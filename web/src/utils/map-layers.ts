@@ -302,20 +302,20 @@ export function getRouteBoundsPadding(): maplibregl.PaddingOptions {
     const isDrawerVisible = drawerEl && !drawerEl.hidden;
     const isDrawerExpanded = isDrawerVisible && !drawerEl.classList.contains('collapsed');
     const bottomPad = isDrawerExpanded
-      ? Math.min(Math.round(vh * 0.65), (drawerEl?.offsetHeight || 220) + 24)
+      ? Math.min(Math.round(vh * 0.72), (drawerEl?.offsetHeight || 220) + 44)
       : isDrawerVisible
-      ? Math.min(220, (drawerEl?.offsetHeight || 72) + 24)
+      ? Math.min(260, (drawerEl?.offsetHeight || 72) + 44)
       : 48;
     return { top: topPad, bottom: bottomPad, left: 28, right: 28 };
   } else {
     const isControlsCollapsed = controlsEl?.classList.contains('collapsed');
-    const leftPad = isControlsCollapsed ? 64 : (controlsEl?.offsetWidth || 368) + 48;
+    const leftPad = isControlsCollapsed ? 96 : (controlsEl?.offsetWidth || 372) + 48;
     const isDrawerVisible = drawerEl && !drawerEl.hidden;
     const isDrawerExpanded = isDrawerVisible && !drawerEl.classList.contains('collapsed');
     const bottomPad = isDrawerExpanded
-      ? Math.min(Math.round(vh * 0.72), (drawerEl?.offsetHeight || 240) + 28)
+      ? Math.min(Math.round(vh * 0.76), (drawerEl?.offsetHeight || 240) + 48)
       : isDrawerVisible
-      ? Math.min(240, (drawerEl?.offsetHeight || 76) + 28)
+      ? Math.min(280, (drawerEl?.offsetHeight || 76) + 48)
       : 56;
     return { top: 44, bottom: bottomPad, left: leftPad, right: 64 };
   }

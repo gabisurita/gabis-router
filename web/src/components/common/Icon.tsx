@@ -27,7 +27,9 @@ export type IconName =
   | 'code'
   | 'save'
   | 'copy'
-  | 'warning';
+  | 'warning'
+  | 'panel-left-close'
+  | 'panel-left-open';
 
 interface IconProps {
   id?: string;
@@ -268,6 +270,22 @@ export const Icon: React.FC<IconProps> = ({ id, name, size = 15, className }) =>
           <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
           <line x1="12" y1="9" x2="12" y2="13" />
           <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+      );
+    case 'panel-left-close':
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <line x1="9" y1="3" x2="9" y2="21" />
+          <polyline points="16 15 13 12 16 9" />
+        </svg>
+      );
+    case 'panel-left-open':
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <line x1="9" y1="3" x2="9" y2="21" />
+          <polyline points="13 9 16 12 13 15" />
         </svg>
       );
     default:

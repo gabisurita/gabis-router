@@ -425,7 +425,7 @@ export const SurfaceBreakdown: React.FC<SurfaceBreakdownProps> = ({
       {visibleSet.has('road') && (
         <StackedBarRow
           rowKey="road"
-          title="Road Type"
+          title="Road type"
           tooltip="UK OpenStreetMap highway=* classes: Paths (cycleway, footway, path, bridleway, pedestrian), Tracks (highway=track), Small Roads (C-roads/tertiary, unclassified, residential, service), B-Roads (secondary), A-Roads (primary non-primary A-roads and trunk primary A-roads), and Motorways (motorway). Click any class chip to expand its subclasses."
           ariaLabel="Road types"
           totalDist={total}

@@ -184,6 +184,100 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           onOpenAbout={onOpenAbout}
         />
 
+        {isCollapsed && (
+          <div
+            className="sidebar-rail-body"
+            title="Expand sidebar"
+            onClick={onToggleCollapse}
+          >
+            <div className="sidebar-rail-slots">
+              {routing.slots.map((slot, slotIdx) => {
+                const slotColor = getSlotColor(slot, slotIdx);
+                const slotMeta = routing.getProfileMeta(slot.profile);
+                const slotLabel =
+                  routing.routeCount > 1
+                    ? `R${(slot.routeIdx ?? 0) + 1} · ${slotMeta.shortLabel}`
+                    : slotMeta.shortLabel;
+                const isSlotActive = slotIdx === routing.activeSlotIdx;
+                return (
+                  <button
+                    key={slotIdx}
+                    type="button"
+                    className={`rail-slot-btn ${isSlotActive ? 'active' : ''}`}
+                    title={
+                      routing.slots.length > 1
+                        ? `${slotLabel} (click to focus)`
+                        : `${slotLabel} (click to expand)`
+                    }
+                    aria-label={slotLabel}
+                    onClick={(e) => {
+                      if (routing.slots.length > 1) {
+                        e.stopPropagation();
+                        routing.setActiveSlot(slotIdx);
+                      }
+                    }}
+                  >
+                    <span
+                      className={`rail-slot-dot ${slot.isRouting ? 'is-routing' : ''}`}
+                      style={{ backgroundColor: slotColor.line }}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+
+            {routing.waypoints.length > 0 && (
+              <div className="sidebar-rail-waypoints">
+                <span className="sidebar-rail-divider" aria-hidden="true" />
+                <span
+                  className="rail-wp-badge rail-wp-start"
+                  title={`Start: ${routing.waypoints[0].name || `${routing.waypoints[0].lat.toFixed(4)}, ${routing.waypoints[0].lon.toFixed(4)}`}`}
+                >
+                  A
+                </span>
+                {routing.waypoints.length >= 2 && (
+                  <>
+                    <span className="rail-wp-stem" aria-hidden="true" />
+                    {routing.waypoints.length > 2 && (
+                      <>
+                        <span
+                          className="rail-wp-via"
+                          title={`${routing.waypoints.length - 2} intermediate waypoint${routing.waypoints.length - 2 > 1 ? 's' : ''}`}
+                        >
+                          +{routing.waypoints.length - 2}
+                        </span>
+                        <span className="rail-wp-stem" aria-hidden="true" />
+                      </>
+                    )}
+                    <span
+                      className="rail-wp-badge rail-wp-end"
+                      title={`End: ${routing.waypoints[routing.waypoints.length - 1].name || `${routing.waypoints[routing.waypoints.length - 1].lat.toFixed(4)}, ${routing.waypoints[routing.waypoints.length - 1].lon.toFixed(4)}`}`}
+                    >
+                      B
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+
+            {(isBusy || offline.isOfflineMode) && (
+              <div className="sidebar-rail-status">
+                {isBusy && (
+                  <span
+                    className="status-spinner status-spinner-sm"
+                    title={routing.status || 'Calculating route...'}
+                  />
+                )}
+                {offline.isOfflineMode && (
+                  <span className="rail-offline-tag" title="Offline Mode Active">
+                    OFF
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="route-section" ref={routeSectionRef}>
           <div className="route-tabs-bar" role="tablist" aria-label="Routes">
             <div className="route-tabs-list">
@@ -269,7 +363,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           <div className="field profile-field">
             <div className="profile-field-header">
               <label htmlFor="profile-select" className="profile-header-label">
-                <span>{activeRouteSlots.length > 1 ? 'Compared Profiles' : 'Profile'}</span>
+                <span>{activeRouteSlots.length > 1 ? 'Profiles' : 'Profile'}</span>
                 <InfoButton
                   tooltip={`${routing.getProfileMeta(routing.profile)?.summary || ''} Use + Profile to compare profiles on the same waypoints, or + Route / Clone above to work on an independent route.`}
                   ariaLabel="About Routing Profiles"
@@ -284,7 +378,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                   onClick={onToggleProfileEditor}
                 >
                   <Icon name="sliders" size={11} />
-                  <span>{isProfileEditorOpen ? 'Close Editor' : 'Edit Profile'}</span>
+                  <span>{isProfileEditorOpen ? 'Close editor' : 'Edit profile'}</span>
                 </button>
                 {activeRouteSlots.length < MAX_ROUTE_SLOTS && (
                   <button
@@ -395,86 +489,89 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
             </div>
           </div>
 
-        <div className="waypoints-top-bar">
-          <div className="waypoints-top-left">
-            <span className="waypoints-heading">Waypoints</span>
-          </div>
+          <div className="waypoints-section">
+            <div className="waypoints-top-bar">
+              <div className="waypoints-top-left">
+                <span className="waypoints-heading">Waypoints</span>
+              </div>
 
-          <div className="route-toolbar-group">
-            <input
-              ref={importFileInputRef}
-              type="file"
-              id="input-import-gpx"
-              accept=".gpx"
-              style={{ display: 'none' }}
-              onChange={handleImportFileChange}
+              <div className="route-toolbar-group">
+                <input
+                  ref={importFileInputRef}
+                  type="file"
+                  id="input-import-gpx"
+                  accept=".gpx"
+                  style={{ display: 'none' }}
+                  onChange={handleImportFileChange}
+                />
+                <button
+                  id="btn-import-gpx"
+                  type="button"
+                  className="btn-toolbar-mini"
+                  title="Upload GPX as editable route"
+                  aria-label="Upload GPX"
+                  onClick={() => importFileInputRef.current?.click()}
+                >
+                  <Icon name="upload" size={12} />
+                  <span>Upload GPX</span>
+                </button>
+                <button
+                  id="btn-undo"
+                  type="button"
+                  className="btn-toolbar-mini btn-toolbar-ghost"
+                  title="Undo (Cmd+Z / Ctrl+Z)"
+                  aria-label="Undo"
+                  disabled={!routing.canUndo}
+                  onClick={routing.undo}
+                >
+                  <Icon name="undo" size={13} />
+                </button>
+                <button
+                  id="btn-redo"
+                  type="button"
+                  className="btn-toolbar-mini btn-toolbar-ghost"
+                  title="Redo (Cmd+Shift+Z / Ctrl+Y)"
+                  aria-label="Redo"
+                  disabled={!routing.canRedo}
+                  onClick={routing.redo}
+                >
+                  <Icon name="redo" size={13} />
+                </button>
+                <button
+                  id="btn-clear-route"
+                  type="button"
+                  className="btn-toolbar-mini btn-toolbar-clear"
+                  title="Clear route and avoid areas"
+                  aria-label="Clear route"
+                  disabled={routing.waypoints.length === 0 && routing.avoidAreas.length === 0}
+                  onClick={routing.clearRoute}
+                >
+                  <Icon name="trash" size={12} />
+                  <span>Clear</span>
+                </button>
+              </div>
+            </div>
+
+            <WaypointList
+              waypoints={routing.waypoints}
+              avoidAreas={routing.avoidAreas}
+              isOfflineMode={offline.isOfflineMode}
+              editingWaypointIndex={editingWaypointIndex}
+              onClearEditingWaypoint={onClearEditingWaypoint}
+              getMapCenter={getMapCenter}
+              onSetWaypointAt={handleSetWaypointAt}
+              onUseMyLocationAt={handleUseMyLocationAt}
+              onReorder={routing.reorderWaypoints}
+              onReverse={routing.reverseRoute}
+              onRemove={routing.removeWaypoint}
+              onRename={routing.renameWaypoint}
+              onRemoveAvoidArea={routing.removeAvoidArea}
+              onUpdateAvoidAreaRadius={routing.updateAvoidAreaRadius}
+              onClearAvoidAreas={routing.clearAvoidAreas}
+              onFlyTo={onFlyTo}
             />
-            <button
-              id="btn-import-gpx"
-              type="button"
-              className="btn-toolbar-mini"
-              title="Upload GPX as editable route"
-              aria-label="Upload GPX"
-              onClick={() => importFileInputRef.current?.click()}
-            >
-              <Icon name="upload" size={12} />
-              <span>Upload GPX</span>
-            </button>
-            <button
-              id="btn-undo"
-              type="button"
-              className="btn-toolbar-mini"
-              title="Undo (Cmd+Z / Ctrl+Z)"
-              aria-label="Undo"
-              disabled={!routing.canUndo}
-              onClick={routing.undo}
-            >
-              <Icon name="undo" size={13} />
-            </button>
-            <button
-              id="btn-redo"
-              type="button"
-              className="btn-toolbar-mini"
-              title="Redo (Cmd+Shift+Z / Ctrl+Y)"
-              aria-label="Redo"
-              disabled={!routing.canRedo}
-              onClick={routing.redo}
-            >
-              <Icon name="redo" size={13} />
-            </button>
-            <button
-              id="btn-clear-route"
-              type="button"
-              className="btn-toolbar-mini btn-toolbar-clear"
-              title="Clear route and avoid areas"
-              aria-label="Clear route"
-              disabled={routing.waypoints.length === 0 && routing.avoidAreas.length === 0}
-              onClick={routing.clearRoute}
-            >
-              <Icon name="trash" size={12} />
-              <span>Clear</span>
-            </button>
           </div>
         </div>
-
-        <WaypointList
-          waypoints={routing.waypoints}
-          avoidAreas={routing.avoidAreas}
-          isOfflineMode={offline.isOfflineMode}
-          editingWaypointIndex={editingWaypointIndex}
-          onClearEditingWaypoint={onClearEditingWaypoint}
-          getMapCenter={getMapCenter}
-          onSetWaypointAt={handleSetWaypointAt}
-          onUseMyLocationAt={handleUseMyLocationAt}
-          onReorder={routing.reorderWaypoints}
-          onReverse={routing.reverseRoute}
-          onRemove={routing.removeWaypoint}
-          onRename={routing.renameWaypoint}
-          onRemoveAvoidArea={routing.removeAvoidArea}
-          onUpdateAvoidAreaRadius={routing.updateAvoidAreaRadius}
-          onClearAvoidAreas={routing.clearAvoidAreas}
-          onFlyTo={onFlyTo}
-        />
 
         <div className="route-section-footer">
           <div
@@ -517,7 +614,6 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
             </button>
           </div>
         </div>
-      </div>
       </div>
 
       {!isCollapsed && isProfileEditorOpen && (

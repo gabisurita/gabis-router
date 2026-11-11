@@ -369,13 +369,19 @@ function buildCategorySegmentHighlight(
   return { coordinates: matchingCoords, color };
 }
 
-let simulatedViewport: { width: number; height: number } | null = null;
-const origMediaTextMap = new WeakMap<CSSMediaRule, string>();
+let simulatedViewport: { width: number; height: number } | null =
+  (window as any).__rsrouterSimulatedViewport || null;
+const origMediaTextMap: WeakMap<CSSMediaRule, string> =
+  (window as any).__rsrouterOrigMediaTextMap ||
+  ((window as any).__rsrouterOrigMediaTextMap = new WeakMap<CSSMediaRule, string>());
 
 function doesMediaRuleMatchWidth(mediaText: string, vw: number): boolean {
   const maxMatch = mediaText.match(/max-width:\s*(\d+)px/i);
-  if (maxMatch) return vw <= Number(maxMatch[1]);
   const minMatch = mediaText.match(/min-width:\s*(\d+)px/i);
+  if (maxMatch && minMatch) {
+    return vw >= Number(minMatch[1]) && vw <= Number(maxMatch[1]);
+  }
+  if (maxMatch) return vw <= Number(maxMatch[1]);
   if (minMatch) return vw >= Number(minMatch[1]);
   return window.matchMedia(mediaText).matches;
 }
@@ -385,6 +391,7 @@ async function applySimulatedViewport(
   vp: { width: number; height: number } | null,
 ) {
   simulatedViewport = vp;
+  (window as any).__rsrouterSimulatedViewport = vp;
   const rootEl = document.getElementById('root');
   if (rootEl) {
     if (vp) {
@@ -506,6 +513,9 @@ async function captureCompositeScreenshot(ctx: McpBridgeContext): Promise<{
   // 1. Draw MapLibre WebGL canvas
   const map = ctx.mapRef.current;
   if (map) {
+    if (map.getCanvas().width === 0 || map.getCanvas().height === 0) {
+      map.resize();
+    }
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 300);
       map.once('render', () => {
@@ -515,7 +525,9 @@ async function captureCompositeScreenshot(ctx: McpBridgeContext): Promise<{
       map.triggerRepaint();
     });
     const mapCanvas = map.getCanvas();
-    outCtx.drawImage(mapCanvas, 0, 0, width, height);
+    if (mapCanvas.width > 0 && mapCanvas.height > 0) {
+      outCtx.drawImage(mapCanvas, 0, 0, width, height);
+    }
   }
 
   // 2. Render DOM UI overlays (controls panel, route info drawer, markers, map controls) via SVG foreignObject
@@ -524,9 +536,27 @@ async function captureCompositeScreenshot(ctx: McpBridgeContext): Promise<{
 
   // Remove WebGL canvas and script elements from clone so map shows through underneath
   bodyClone.querySelectorAll('canvas.maplibregl-canvas, script').forEach((el) => el.remove());
-  bodyClone.querySelectorAll('img').forEach((img) => {
-    const src = img.getAttribute('src') || '';
-    if (/^https?:\/\//i.test(src)) img.remove();
+  const origImgs = document.body.querySelectorAll('img');
+  const cloneImgs = bodyClone.querySelectorAll('img');
+  origImgs.forEach((origImg, idx) => {
+    const cloneImg = cloneImgs[idx];
+    if (!cloneImg) return;
+    const src = cloneImg.getAttribute('src') || '';
+    if (/^https?:\/\//i.test(src)) {
+      cloneImg.remove();
+      return;
+    }
+    if (origImg.complete && origImg.naturalWidth > 0) {
+      try {
+        const c = document.createElement('canvas');
+        c.width = origImg.naturalWidth;
+        c.height = origImg.naturalHeight;
+        c.getContext('2d')?.drawImage(origImg, 0, 0);
+        cloneImg.setAttribute('src', c.toDataURL('image/png'));
+      } catch {
+        // ignore tainted canvas
+      }
+    }
   });
   bodyClone.style.background = 'transparent';
   bodyClone.style.margin = '0';

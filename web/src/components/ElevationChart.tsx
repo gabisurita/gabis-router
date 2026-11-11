@@ -15,8 +15,8 @@ import {
 } from '../utils/classification.ts';
 import { gradeAt, gradeColor, nearestIndex, nearestVertex } from '../utils/geo.ts';
 
-const CHART_HEIGHT = 100;
-const COMPACT_CHART_HEIGHT = 74;
+const CHART_HEIGHT = 118;
+const COMPACT_CHART_HEIGHT = 108;
 const CHART_PAD = { top: 8, bottom: 15, left: 4, right: 4 };
 
 interface ElevationChartProps {
@@ -130,11 +130,11 @@ export const ElevationChart: React.FC<ElevationChartProps> = ({
       const spCat = classifySpeedLimit(target.maxspeed, target.highway);
       const speedLabel =
         spCat !== 'car_free' && spCat !== 'untagged'
-          ? `Limit: ${SPEED_LIMIT_META[spCat].label} mph`
+          ? `${SPEED_LIMIT_META[spCat].label} mph`
           : '';
       const costLabel =
         typeof target.costfactor === 'number' && target.costfactor > 0
-          ? `Cost: ${target.costfactor.toFixed(2)}×`
+          ? `${target.costfactor.toFixed(2)}×`
           : '';
       return {
         surfLabel: SURFACE_SUB_META[sCat].label,

@@ -126,11 +126,9 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
   onFlyTo,
   onRemoveWaypoint,
 }) => {
-  const [collapsedBySlot, setCollapsedBySlot] = useState<Record<number, boolean>>({
-    0: isCollapsed,
-    1: isCollapsed,
-    2: isCollapsed,
-  });
+  const [expandedSlotIdx, setExpandedSlotIdx] = useState<number | null>(() =>
+    isCollapsed ? null : activeSlotIdx,
+  );
   const [warningsOpenBySlot, setWarningsOpenBySlot] = useState<Record<number, boolean>>({});
   const [pinnedWarningId, setPinnedWarningId] = useState<string | null>(null);
   const [visibleBars, setVisibleBars] = useState<BreakdownBarId[]>(() => {
@@ -166,18 +164,35 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
     });
   };
   const internalToggleRef = useRef<boolean>(false);
+  const activeSlotIdxRef = useRef<number>(activeSlotIdx);
+  activeSlotIdxRef.current = activeSlotIdx;
 
   useEffect(() => {
     if (internalToggleRef.current) {
       internalToggleRef.current = false;
       return;
     }
-    setCollapsedBySlot({
-      0: isCollapsed,
-      1: isCollapsed,
-      2: isCollapsed,
-    });
+    setExpandedSlotIdx(isCollapsed ? null : activeSlotIdxRef.current);
   }, [isCollapsed]);
+
+  const prevActiveSlotRef = useRef<number>(activeSlotIdx);
+  useEffect(() => {
+    if (prevActiveSlotRef.current !== activeSlotIdx) {
+      prevActiveSlotRef.current = activeSlotIdx;
+      setExpandedSlotIdx((prev) => (prev === null ? null : activeSlotIdx));
+    }
+  }, [activeSlotIdx]);
+
+  useEffect(() => {
+    setExpandedSlotIdx((prev) => {
+      if (prev === null) return null;
+      if (slots.length === 1) return 0;
+      if (prev >= slots.length) {
+        return Math.min(activeSlotIdx, Math.max(0, slots.length - 1));
+      }
+      return prev;
+    });
+  }, [slots.length, activeSlotIdx]);
 
   const parsedSlots = useMemo(
     () => slots.map((slot) => parseRouteFeatureCollection(slot.route, slot.waypoints)),
@@ -186,27 +201,34 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
 
   const hasAnyRoute = parsedSlots.some((d) => d !== null);
   const anyRouting = slots.some((s) => s.isRouting);
-  const hadAnyRouteRef = useRef<boolean>(false);
+  const hadAnyRouteRef = useRef<boolean>(hasAnyRoute);
 
   useEffect(() => {
-    if (hasAnyRoute && !hadAnyRouteRef.current) {
-      setCollapsedBySlot({ 0: false, 1: false, 2: false });
+    if (hasAnyRoute && !hadAnyRouteRef.current && !isCollapsed) {
+      setExpandedSlotIdx(activeSlotIdx);
     }
     hadAnyRouteRef.current = hasAnyRoute;
-  }, [hasAnyRoute]);
+  }, [hasAnyRoute, activeSlotIdx, isCollapsed]);
 
   if (!hasAnyRoute && !anyRouting) return null;
 
   const isMultiSlot = slots.length > 1;
-  const allCollapsed = slots.every((_, idx) => Boolean(collapsedBySlot[idx]));
+  const allCollapsed = expandedSlotIdx === null;
   const hasMultiRoutes = slots.some((s) => (s.routeIdx ?? 0) !== (slots[0]?.routeIdx ?? 0));
-  const activeRouteIdx = slots[activeSlotIdx]?.routeIdx ?? 0;
 
   const handleToggleSlot = (slotIdx: number) => {
-    const nextVal = !Boolean(collapsedBySlot[slotIdx]);
-    const next = { ...collapsedBySlot, [slotIdx]: nextVal };
-    setCollapsedBySlot(next);
-    const nextAllCollapsed = slots.every((_, idx) => Boolean(next[idx]));
+    const isCurrentlyExpanded = isMultiSlot
+      ? expandedSlotIdx === slotIdx
+      : expandedSlotIdx !== null;
+    const nextExpanded = isCurrentlyExpanded ? null : slotIdx;
+    setExpandedSlotIdx(nextExpanded);
+
+    if (nextExpanded !== null && isMultiSlot && slotIdx !== activeSlotIdx) {
+      prevActiveSlotRef.current = slotIdx;
+      onSelectActiveSlot?.(slotIdx);
+    }
+
+    const nextAllCollapsed = nextExpanded === null;
     if (nextAllCollapsed !== isCollapsed) {
       internalToggleRef.current = true;
       onToggleCollapse();
@@ -224,9 +246,9 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
 
         const slotColor = getSlotColor(slot, slotIdx);
         const profileMeta = getProfileMeta ? getProfileMeta(slot.profile) : PROFILE_INFO[slot.profile];
-        const barCollapsed = Boolean(collapsedBySlot[slotIdx]);
+        const barCollapsed = isMultiSlot ? expandedSlotIdx !== slotIdx : expandedSlotIdx === null;
         const slotRouteIdx = slot.routeIdx ?? 0;
-        const isSlotActive = hasMultiRoutes && slotRouteIdx === activeRouteIdx;
+        const isSlotActive = isMultiSlot && slotIdx === activeSlotIdx;
 
         return (
           <div
@@ -238,7 +260,8 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
             <div
               className="ri-bar-header"
               onClick={() => {
-                if (hasMultiRoutes && slotRouteIdx !== activeRouteIdx) {
+                if (isMultiSlot && slotIdx !== activeSlotIdx) {
+                  prevActiveSlotRef.current = slotIdx;
                   onSelectActiveSlot?.(slotIdx);
                 }
                 handleToggleSlot(slotIdx);
@@ -279,7 +302,7 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                     <span id={slotIdx === 0 ? 'ri-time' : `ri-time-${slotIdx}`}>
                       {formatDuration(routeData.time)}
                     </span>
-                    <small>Est. Time</small>
+                    <small>Est. time</small>
                   </div>
                   <div className="ri-stat">
                     <span id={slotIdx === 0 ? 'ri-ascent' : `ri-ascent-${slotIdx}`}>
@@ -297,7 +320,7 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                     <span id={slotIdx === 0 ? 'ri-speed' : `ri-speed-${slotIdx}`}>
                       {formatSpeed(routeData.distance, routeData.time)}
                     </span>
-                    <small>Avg Speed</small>
+                    <small>Avg speed</small>
                   </div>
                   {routeData.costFactor > 0 && (
                     <div
@@ -332,7 +355,7 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                     aria-label={`${routeData.warnings.length} route warnings`}
                     aria-expanded={Boolean(warningsOpenBySlot[slotIdx])}
                     onClick={() => {
-                      if (hasMultiRoutes && slotRouteIdx !== activeRouteIdx) {
+                      if (isMultiSlot && slotIdx !== activeSlotIdx) {
                         onSelectActiveSlot?.(slotIdx);
                       }
                       setWarningsOpenBySlot((prev) => ({
@@ -448,7 +471,7 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                             className="ri-warning-chip-main"
                             title={`${meta.label} at ${formatMarkerDist(w.from, units)}: ${w.detail} (${formatDistance(w.distanceM)}) — click to locate on map`}
                             onClick={() => {
-                              if (hasMultiRoutes && slotRouteIdx !== activeRouteIdx) {
+                              if (isMultiSlot && slotIdx !== activeSlotIdx) {
                                 onSelectActiveSlot?.(slotIdx);
                               }
                               setPinnedWarningId((prev) => {
@@ -485,7 +508,7 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                               title={`Remove misplaced Waypoint ${wpLbl || w.waypointIndex} to eliminate this U-turn rollback`}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                if (hasMultiRoutes && slotRouteIdx !== activeRouteIdx) {
+                                if (isMultiSlot && slotIdx !== activeSlotIdx) {
                                   onSelectActiveSlot?.(slotIdx);
                                 }
                                 onRemoveWaypoint(w.waypointIndex!);
@@ -512,7 +535,7 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                 >
                   <div className="ri-col-header">
                     <span className="ri-col-title">
-                      Elevation Profile
+                      Elevation profile
                       <InfoButton
                         tooltip="Height above sea level sampled from terrain elevation data. Gradients are calculated over 40-metre windows. Bridge elevations over water are not accurately measured."
                         ariaLabel="About Elevation Profile"

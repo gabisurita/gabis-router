@@ -45,7 +45,15 @@ export const Header: React.FC<HeaderProps> = ({
     >
       <div className="header-top">
         <div className="header-title-wrap">
-          <h1>
+          <h1
+            title={isCollapsed ? "Gabi's Router: click to expand" : undefined}
+            onClick={(e) => {
+              if (isCollapsed) {
+                e.stopPropagation();
+                onToggleCollapse();
+              }
+            }}
+          >
             <span className="header-logo" aria-hidden="true">
               <img src="/logo.png" alt="" className="header-logo-img" />
             </span>
@@ -104,7 +112,7 @@ export const Header: React.FC<HeaderProps> = ({
             id="btn-toggle-collapse"
             type="button"
             className="collapse-btn"
-            title={isCollapsed ? 'Expand controls' : 'Collapse controls'}
+            title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             aria-label={isCollapsed ? 'Expand panel' : 'Collapse panel'}
             aria-expanded={!isCollapsed}
             onClick={(e) => {
@@ -112,7 +120,17 @@ export const Header: React.FC<HeaderProps> = ({
               onToggleCollapse();
             }}
           >
-            <Icon id="collapse-icon" name="chevron-up" size={16} />
+            <Icon
+              className="sidebar-collapse-icon"
+              name={isCollapsed ? 'panel-left-open' : 'panel-left-close'}
+              size={16}
+            />
+            <Icon
+              id="collapse-icon"
+              className="mobile-collapse-icon"
+              name="chevron-up"
+              size={16}
+            />
           </button>
         </div>
       </div>
