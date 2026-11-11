@@ -16,6 +16,8 @@
   "dependencies": {
     "@capacitor/android": "^7.3.0",
     "@capacitor/core": "^7.4.0",
+    "@fontsource-variable/ibm-plex-sans": "^5.2.6",
+    "@fontsource/ibm-plex-mono": "^5.2.6",
     "maplibre-contour": "^0.1.1",
     "maplibre-gl": "^4.7.1",
     "pmtiles": "^4.5.0",

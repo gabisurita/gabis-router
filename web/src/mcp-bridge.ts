@@ -432,6 +432,53 @@ async function applySimulatedViewport(
   }
 }
 
+const fontDataUrlCache: Map<string, string> =
+  (window as any).__rsrouterFontDataUrlCache ||
+  ((window as any).__rsrouterFontDataUrlCache = new Map<string, string>());
+
+async function inlineSameOriginFontFace(cssText: string): Promise<string> {
+  const urlMatches = Array.from(cssText.matchAll(/url\((['"]?)([^)'"]+)\1\)/gi));
+  let out = cssText;
+  for (const m of urlMatches) {
+    const rawUrl = m[2];
+    if (!rawUrl || rawUrl.startsWith('data:')) continue;
+    let absUrl: URL;
+    try {
+      absUrl = new URL(rawUrl, window.location.href);
+    } catch {
+      continue;
+    }
+    if (absUrl.origin !== window.location.origin) {
+      out = out.replace(m[0], 'none');
+      continue;
+    }
+    const key = absUrl.href;
+    let dataUrl = fontDataUrlCache.get(key);
+    if (!dataUrl) {
+      try {
+        const resp = await fetch(key);
+        if (resp.ok) {
+          const buf = await resp.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          let binary = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+          }
+          dataUrl = `data:font/woff2;base64,${btoa(binary)}`;
+          fontDataUrlCache.set(key, dataUrl);
+        }
+      } catch {
+        // ignore fetch error
+      }
+    }
+    if (dataUrl) {
+      out = out.replace(m[0], `url("${dataUrl}")`);
+    }
+  }
+  return out;
+}
+
 function sanitizeCssRuleText(cssText: string, vw: number, vh: number): string {
   return cssText
     .replace(/url\((['"]?)https?:\/\/[^)]+\1\)/gi, 'none')
@@ -440,12 +487,14 @@ function sanitizeCssRuleText(cssText: string, vw: number, vh: number): string {
     .replace(/env\(safe-area-inset-[a-z]+(?:,\s*[^)]+)?\)/gi, '0px');
 }
 
-function collectSafeCss(vw: number, vh: number): string {
+async function collectSafeCss(vw: number, vh: number): Promise<string> {
   const chunks: string[] = [];
   for (const sheet of Array.from(document.styleSheets)) {
     try {
       for (const rule of Array.from(sheet.cssRules)) {
-        if (rule instanceof CSSMediaRule) {
+        if (rule instanceof CSSFontFaceRule) {
+          chunks.push(await inlineSameOriginFontFace(rule.cssText));
+        } else if (rule instanceof CSSMediaRule) {
           const orig = origMediaTextMap.get(rule) || rule.conditionText || rule.media.mediaText;
           if (doesMediaRuleMatchWidth(orig, vw)) {
             for (const inner of Array.from(rule.cssRules)) {
@@ -572,7 +621,10 @@ async function captureCompositeScreenshot(ctx: McpBridgeContext): Promise<{
   const mapClone = bodyClone.querySelector('#map') as HTMLElement | null;
   if (mapClone) mapClone.style.background = 'transparent';
 
-  const cssText = collectSafeCss(width, height).replace(/\]\]>/g, '');
+  if (document.fonts?.ready) {
+    await document.fonts.ready;
+  }
+  const cssText = (await collectSafeCss(width, height)).replace(/\]\]>/g, '');
   const htmlTheme = document.documentElement.getAttribute('data-theme') || 'light';
   const serializedBody = new XMLSerializer().serializeToString(bodyClone);
 

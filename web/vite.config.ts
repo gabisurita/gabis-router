@@ -198,6 +198,7 @@ export default defineConfig({
           ...files.map((f) => `/${f}`),
           '/manifest.json',
           '/favicon.svg',
+          '/logo.png',
           '/icon-192.png',
           '/icon-512.png',
           '/apple-touch-icon.png',
