@@ -8,6 +8,7 @@ import {
 } from '../types.ts';
 import type { SegmentHighlight } from './classification.ts';
 import { createCirclePolygon } from './geo.ts';
+import type { PreviewLibraryRoute, SuggestedLibraryTrack } from './route-library.ts';
 
 const ROUTE_HIT_PX = 8;
 
@@ -298,7 +299,12 @@ export function getRouteBoundsPadding(): maplibregl.PaddingOptions {
 
   if (isMobile) {
     const isControlsExpanded = controlsEl && !controlsEl.classList.contains('collapsed');
-    const topPad = isControlsExpanded ? Math.min(260, (controlsEl?.offsetHeight || 200) + 24) : 72;
+    const maxTopPad = controlsEl?.classList.contains('library-open')
+      ? Math.round(vh * 0.6)
+      : 260;
+    const topPad = isControlsExpanded
+      ? Math.min(maxTopPad, (controlsEl?.offsetHeight || 200) + 20)
+      : 72;
     const isDrawerVisible = drawerEl && !drawerEl.hidden;
     const isDrawerExpanded = isDrawerVisible && !drawerEl.classList.contains('collapsed');
     const bottomPad = isDrawerExpanded
@@ -398,4 +404,278 @@ export function fitRouteBounds(
       duration: shouldAnimate ? 600 : 0,
     },
   );
+}
+
+export function fitCoordinatesBounds(
+  map: maplibregl.Map,
+  coordinates: [number, number][],
+  animate = true,
+) {
+  if (coordinates.length === 0) return;
+  let minLon = Infinity;
+  let maxLon = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  for (const [lon, lat] of coordinates) {
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  }
+  const shouldAnimate = animate && (typeof document === 'undefined' || !document.hidden);
+  if (minLon === maxLon && minLat === maxLat) {
+    map.flyTo({ center: [minLon, minLat], zoom: 13, duration: shouldAnimate ? 500 : 0 });
+    return;
+  }
+  map.fitBounds(
+    [
+      [minLon, minLat],
+      [maxLon, maxLat],
+    ],
+    {
+      padding: getRouteBoundsPadding(),
+      maxZoom: 14.5,
+      duration: shouldAnimate ? 500 : 0,
+    },
+  );
+}
+
+export type SuggestionDimLevel = 'none' | 'soft' | 'strong';
+
+export function syncLibraryLayers(
+  map: maplibregl.Map,
+  isLibraryOpen: boolean,
+  suggestedTracks: SuggestedLibraryTrack[],
+  activePreview: PreviewLibraryRoute | null,
+  dimLevel: SuggestionDimLevel = 'none',
+) {
+  // Soften background cycle-network lines while browsing the route library so
+  // suggested routes stand out clearly without purple/red overlay clutter.
+  const styleLayers = map.getStyle()?.layers;
+  if (styleLayers) {
+    const cycleLineOpacity = isLibraryOpen ? 0.22 : 1;
+    for (const l of styleLayers) {
+      if (l.type === 'line' && l.id.startsWith('ocm-route-')) {
+        map.setPaintProperty(l.id, 'line-opacity', cycleLineOpacity);
+      }
+    }
+  }
+
+  const beforeId = getFirstLabelLayerId(map);
+  const focusedId = activePreview?.route.id ?? null;
+  const dimCode = dimLevel === 'strong' ? 2 : dimLevel === 'soft' ? 1 : 0;
+
+  const suggestionFeatures: GeoJSON.Feature[] = [];
+  if (isLibraryOpen) {
+    // Reverse so #1 renders above #2..#5 when routes overlap.
+    for (let i = suggestedTracks.length - 1; i >= 0; i--) {
+      const item = suggestedTracks[i];
+      if (item.coordinates.length < 2) continue;
+      if (focusedId === item.route.id) continue;
+      suggestionFeatures.push({
+        type: 'Feature',
+        properties: {
+          id: item.route.id,
+          rank: item.rank,
+          lineColor: item.color.line,
+          casingColor: item.color.casing,
+          dimCode,
+        },
+        geometry: {
+          type: 'LineString',
+          coordinates: item.coordinates,
+        },
+      });
+    }
+  }
+
+  const suggestionsData: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: suggestionFeatures,
+  };
+
+  const previewLineData: GeoJSON.FeatureCollection =
+    isLibraryOpen && activePreview && activePreview.coordinates.length >= 2
+      ? {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: {
+                id: activePreview.route.id,
+                lineColor: activePreview.color.line,
+                casingColor: activePreview.color.casing,
+              },
+              geometry: {
+                type: 'LineString',
+                coordinates: activePreview.coordinates,
+              },
+            },
+          ],
+        }
+      : EMPTY_FC;
+
+  const previewPinFeatures: GeoJSON.Feature[] = [];
+  if (isLibraryOpen && activePreview && activePreview.coordinates.length >= 2) {
+    for (const stop of activePreview.route.stops || []) {
+      if (stop.pos && stop.pos.length === 2) {
+        previewPinFeatures.push({
+          type: 'Feature',
+          properties: { role: 'stop', name: stop.name },
+          geometry: { type: 'Point', coordinates: stop.pos },
+        });
+      }
+    }
+    const first = activePreview.coordinates[0];
+    const last = activePreview.coordinates[activePreview.coordinates.length - 1];
+    if (!activePreview.route.loop) {
+      previewPinFeatures.push({
+        type: 'Feature',
+        properties: { role: 'end' },
+        geometry: { type: 'Point', coordinates: last },
+      });
+    }
+    previewPinFeatures.push({
+      type: 'Feature',
+      properties: { role: 'start' },
+      geometry: { type: 'Point', coordinates: first },
+    });
+  }
+  const previewPinsData: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: previewPinFeatures,
+  };
+
+  const sugSrc = map.getSource('library-suggestions') as maplibregl.GeoJSONSource | undefined;
+  if (sugSrc) {
+    sugSrc.setData(suggestionsData);
+  } else if (isLibraryOpen) {
+    map.addSource('library-suggestions', { type: 'geojson', data: suggestionsData });
+    map.addLayer(
+      {
+        id: 'library-suggestions-halo',
+        type: 'line',
+        source: 'library-suggestions',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 6.4, 11, 7.8, 15, 9.2],
+          'line-opacity': ['match', ['get', 'dimCode'], 2, 0.2, 1, 0.4, 0.92],
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'library-suggestions-casing',
+        type: 'line',
+        source: 'library-suggestions',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'casingColor'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 4.6, 11, 5.8, 15, 7.0],
+          'line-opacity': ['match', ['get', 'dimCode'], 2, 0.22, 1, 0.42, 0.94],
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'library-suggestions-line',
+        type: 'line',
+        source: 'library-suggestions',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'lineColor'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 3.0, 11, 4.0, 15, 5.0],
+          'line-opacity': ['match', ['get', 'dimCode'], 2, 0.25, 1, 0.48, 1],
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'library-suggestions-hit',
+        type: 'line',
+        source: 'library-suggestions',
+        paint: { 'line-color': '#000000', 'line-width': 16, 'line-opacity': 0 },
+      },
+      beforeId,
+    );
+  }
+
+  const previewSrc = map.getSource('library-preview') as maplibregl.GeoJSONSource | undefined;
+  if (previewSrc) {
+    previewSrc.setData(previewLineData);
+  } else if (isLibraryOpen) {
+    map.addSource('library-preview', { type: 'geojson', data: previewLineData });
+    map.addLayer(
+      {
+        id: 'library-preview-halo',
+        type: 'line',
+        source: 'library-preview',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 8.2, 11, 10.0, 15, 11.8],
+          'line-opacity': 0.96,
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'library-preview-casing',
+        type: 'line',
+        source: 'library-preview',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'casingColor'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 5.8, 11, 7.2, 15, 8.8],
+          'line-opacity': 0.98,
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'library-preview-line',
+        type: 'line',
+        source: 'library-preview',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'lineColor'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 4.0, 11, 5.0, 15, 6.2],
+          'line-opacity': 1,
+        },
+      },
+      beforeId,
+    );
+  }
+
+  const pinsSrc = map.getSource('library-preview-pins') as maplibregl.GeoJSONSource | undefined;
+  if (pinsSrc) {
+    pinsSrc.setData(previewPinsData);
+  } else if (isLibraryOpen) {
+    map.addSource('library-preview-pins', { type: 'geojson', data: previewPinsData });
+    map.addLayer({
+      id: 'library-preview-pins-layer',
+      type: 'circle',
+      source: 'library-preview-pins',
+      paint: {
+        'circle-radius': ['match', ['get', 'role'], 'stop', 5.5, 7],
+        'circle-color': [
+          'match',
+          ['get', 'role'],
+          'start',
+          '#16a34a',
+          'end',
+          '#dc2626',
+          '#f59e0b',
+        ],
+        'circle-stroke-width': 2.4,
+        'circle-stroke-color': '#ffffff',
+      },
+    });
+  }
 }

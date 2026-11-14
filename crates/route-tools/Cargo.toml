@@ -6,7 +6,16 @@ authors = ["Gabriela Surita"]
 license = "MIT"
 description = "GPX map-matching, waypoint extraction, and route segment analysis built on brouter-rs"
 
+[features]
+cli = ["dep:flate2"]
+
+[[bin]]
+name = "build_cycle_tiles"
+path = "src/bin/build_cycle_tiles.rs"
+required-features = ["cli"]
+
 [dependencies]
 brouter-rs = { path = "../../subrepos/brouter-rs", default-features = false }
+flate2 = { version = "1.0", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

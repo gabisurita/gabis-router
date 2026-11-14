@@ -29,7 +29,9 @@ export type IconName =
   | 'copy'
   | 'warning'
   | 'panel-left-close'
-  | 'panel-left-open';
+  | 'panel-left-open'
+  | 'book'
+  | 'external';
 
 interface IconProps {
   id?: string;
@@ -286,6 +288,21 @@ export const Icon: React.FC<IconProps> = ({ id, name, size = 15, className }) =>
           <rect x="3" y="3" width="18" height="18" rx="2" />
           <line x1="9" y1="3" x2="9" y2="21" />
           <polyline points="13 9 16 12 13 15" />
+        </svg>
+      );
+    case 'book':
+      return (
+        <svg {...common}>
+          <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+          <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+        </svg>
+      );
+    case 'external':
+      return (
+        <svg {...common}>
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+          <polyline points="15 3 21 3 21 9" />
+          <line x1="10" y1="14" x2="21" y2="3" />
         </svg>
       );
     default:

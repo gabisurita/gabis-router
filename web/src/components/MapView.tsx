@@ -33,7 +33,12 @@ import { centerRouteControl } from '../center-control.ts';
 import { legendControl } from '../legend-control.ts';
 import { terrain3DControl } from '../terrain-control.ts';
 import { loadedPMTiles, archivesReady } from '../hooks/useOffline.ts';
-import { CYCLE_ROUTES_ARCHIVE, MAP_TILES_CACHE_NAME, segmentsForTile } from '../segment-cache.ts';
+import {
+  CYCLE_ROUTES_ARCHIVE,
+  MAP_TILES_CACHE_NAME,
+  isTileStrictlyInsideSegment,
+  segmentsForTile,
+} from '../segment-cache.ts';
 import { getMapTileDownloadUrl } from '../platform.ts';
 import {
   showMenu,
@@ -50,14 +55,63 @@ import {
   syncAvoidAreasLayer,
   syncRoutesLayers,
   syncHighlightLayer,
+  syncLibraryLayers,
   fitRouteBounds,
+  fitCoordinatesBounds,
+  type SuggestionDimLevel,
 } from '../utils/map-layers.ts';
+import type {
+  LibraryRoute,
+  MapBoundsBox,
+  PreviewLibraryRoute,
+  SuggestedLibraryTrack,
+} from '../utils/route-library.ts';
 
 const remotePMTiles = new Map<string, pmtiles.PMTiles>();
+const missingDevPMTiles = new Set<string>();
+let devAvailableSegmentsPromise: Promise<Set<string> | null> | null = null;
 let devCycleCacheBust = Date.now();
+
+function getDevAvailableSegments(): Promise<Set<string> | null> {
+  if (!import.meta.env.DEV) return Promise.resolve(null);
+  if (!devAvailableSegmentsPromise) {
+    devAvailableSegmentsPromise = fetch('/map-tiles/__available.json')
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const arr = await res.json();
+        return Array.isArray(arr) ? new Set<string>(arr) : null;
+      })
+      .catch(() => null);
+  }
+  return devAvailableSegmentsPromise;
+}
+
+const OFM_PLANET_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
+const OFM_PLANET_FALLBACK_TEMPLATE =
+  'https://tiles.openfreemap.org/planet/20261101_080013_pt/{z}/{x}/{y}.pbf';
+let ofmPlanetTemplatePromise: Promise<string> | null = null;
+
+function getOpenFreeMapTileTemplate(): Promise<string> {
+  if (!ofmPlanetTemplatePromise) {
+    ofmPlanetTemplatePromise = fetch(OFM_PLANET_TILEJSON_URL)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        const tpl =
+          Array.isArray(json?.tiles) && typeof json.tiles[0] === 'string' ? json.tiles[0] : null;
+        if (!tpl) throw new Error('Missing tiles template');
+        return tpl;
+      })
+      .catch(() => OFM_PLANET_FALLBACK_TEMPLATE);
+  }
+  return ofmPlanetTemplatePromise;
+}
+
 // Register PMTiles protocols
 function registerProtocols() {
   remotePMTiles.clear();
+  missingDevPMTiles.clear();
+  devAvailableSegmentsPromise = null;
   devCycleCacheBust = Date.now();
   if ((window as any).__rsrouterProtocolsRegistered) return;
   (window as any).__rsrouterProtocolsRegistered = true;
@@ -96,6 +150,9 @@ function registerProtocols() {
         if (tile && tile.data) {
           return { data: tile.data };
         }
+        if (isTileStrictlyInsideSegment(z, x, y, seg)) {
+          return { data: new Uint8Array(0) };
+        }
       }
     }
 
@@ -109,15 +166,41 @@ function registerProtocols() {
 
     const isOffline = localStorage.getItem('rsrouter_offline_mode') === 'true';
     if (!isOffline) {
+      const devAvailable = await getDevAvailableSegments();
       for (const seg of candidateSegments) {
-        if (loadedPMTiles.has(seg)) continue;
+        if (loadedPMTiles.has(seg) || missingDevPMTiles.has(seg)) continue;
+        if (devAvailable && !devAvailable.has(seg)) continue;
         try {
           const tile = await getRemoteArchive(seg).getZxy(z, x, y, abortController?.signal);
           if (tile && tile.data) {
             return { data: tile.data };
           }
+          if (isTileStrictlyInsideSegment(z, x, y, seg)) {
+            return { data: new Uint8Array(0) };
+          }
+        } catch (err: any) {
+          if (import.meta.env.DEV && !abortController?.signal.aborted && String(err).includes('404')) {
+            missingDevPMTiles.add(seg);
+          }
+        }
+      }
+
+      if (!abortController?.signal.aborted && z <= 14) {
+        try {
+          const tpl = await getOpenFreeMapTileTemplate();
+          const tileUrl = tpl
+            .replace('{z}', String(z))
+            .replace('{x}', String(x))
+            .replace('{y}', String(y));
+          const res = await fetch(tileUrl, {
+            cache: 'force-cache',
+            signal: abortController?.signal,
+          });
+          if (res.ok) {
+            return { data: await res.arrayBuffer() };
+          }
         } catch {
-          // Ignore network/abort errors and try next matching segment
+          // Ignore network/abort errors
         }
       }
     }
@@ -220,6 +303,14 @@ interface MapViewProps {
   ) => Promise<PointWayInfo | null>;
   onStatusChange: (status: string) => void;
   onMapInstance?: (map: maplibregl.Map) => void;
+  isRouteLibraryOpen?: boolean;
+  suggestedLibraryTracks?: SuggestedLibraryTrack[];
+  activeLibraryPreview?: PreviewLibraryRoute | null;
+  libraryDimLevel?: SuggestionDimLevel;
+  frameLibraryPreviewSeq?: number;
+  onSelectLibraryRoute?: (routeId: number) => void;
+  onHoverLibraryRoute?: (route: LibraryRoute | null) => void;
+  onMapViewportChange?: (bounds: MapBoundsBox, center: { lat: number; lon: number }) => void;
 }
 
 export const MapView: React.FC<MapViewProps> = ({
@@ -248,12 +339,21 @@ export const MapView: React.FC<MapViewProps> = ({
   onInspectPoint,
   onStatusChange,
   onMapInstance,
+  isRouteLibraryOpen = false,
+  suggestedLibraryTracks = [],
+  activeLibraryPreview = null,
+  libraryDimLevel = 'none',
+  frameLibraryPreviewSeq = 0,
+  onSelectLibraryRoute,
+  onHoverLibraryRoute,
+  onMapViewportChange,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const styleReadyRef = useRef<boolean>(false);
   const markersRef = useRef<maplibregl.Marker[]>([]);
   const warningMarkersRef = useRef<maplibregl.Marker[]>([]);
+  const libraryRankMarkersRef = useRef<Array<{ routeId: number; marker: maplibregl.Marker }>>([]);
   const hoverMarkerRef = useRef<maplibregl.Marker | null>(null);
   const draggingMarkerIndexRef = useRef<number | null>(null);
   const lastOpenedMarkerIndexRef = useRef<number | null>(null);
@@ -297,6 +397,20 @@ export const MapView: React.FC<MapViewProps> = ({
   onStatusChangeRef.current = onStatusChange;
   const onMapInstanceRef = useRef(onMapInstance);
   onMapInstanceRef.current = onMapInstance;
+  const isRouteLibraryOpenRef = useRef(isRouteLibraryOpen);
+  isRouteLibraryOpenRef.current = isRouteLibraryOpen;
+  const suggestedLibraryTracksRef = useRef(suggestedLibraryTracks);
+  suggestedLibraryTracksRef.current = suggestedLibraryTracks;
+  const activeLibraryPreviewRef = useRef(activeLibraryPreview);
+  activeLibraryPreviewRef.current = activeLibraryPreview;
+  const libraryDimLevelRef = useRef(libraryDimLevel);
+  libraryDimLevelRef.current = libraryDimLevel;
+  const onSelectLibraryRouteRef = useRef(onSelectLibraryRoute);
+  onSelectLibraryRouteRef.current = onSelectLibraryRoute;
+  const onHoverLibraryRouteRef = useRef(onHoverLibraryRoute);
+  onHoverLibraryRouteRef.current = onHoverLibraryRoute;
+  const onMapViewportChangeRef = useRef(onMapViewportChange);
+  onMapViewportChangeRef.current = onMapViewportChange;
 
   const pendingFitRouteRef = useRef<boolean>(false);
 
@@ -316,6 +430,13 @@ export const MapView: React.FC<MapViewProps> = ({
     syncAvoidAreasLayer(map, avoidAreasRef.current);
     syncRoutesLayers(map, slotsRef.current, activeSlotIdxRef.current);
     syncHighlightLayer(map, segmentHighlight);
+    syncLibraryLayers(
+      map,
+      isRouteLibraryOpenRef.current,
+      suggestedLibraryTracksRef.current,
+      activeLibraryPreviewRef.current ?? null,
+      libraryDimLevelRef.current,
+    );
   }, [segmentHighlight]);
 
   // Map initialization
@@ -330,7 +451,7 @@ export const MapView: React.FC<MapViewProps> = ({
       zoom: 6,
       maxBounds: isOfflineMode ? UK_BOUNDS : undefined,
       attributionControl: false,
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: Boolean(import.meta.env.DEV),
     });
     mapRef.current = map;
     (window as any).map = map;
@@ -597,6 +718,23 @@ export const MapView: React.FC<MapViewProps> = ({
       showMenu(items, x, y, `Avoid area (${Math.round(area.radius)} m)`);
     };
 
+    const emitViewport = () => {
+      if (!isRouteLibraryOpenRef.current || !onMapViewportChangeRef.current) return;
+      const b = map.getBounds();
+      const c = map.getCenter();
+      onMapViewportChangeRef.current(
+        {
+          west: b.getWest(),
+          south: b.getSouth(),
+          east: b.getEast(),
+          north: b.getNorth(),
+        },
+        { lat: c.lat, lon: c.lng },
+      );
+    };
+    map.on('moveend', emitViewport);
+    emitViewport();
+
     map.on('click', (e) => {
       if (
         draggingMarkerIndexRef.current !== null ||
@@ -608,6 +746,25 @@ export const MapView: React.FC<MapViewProps> = ({
       if ((e.originalEvent as MouseEvent)?.detail > 1) {
         clearSingleClick();
         return;
+      }
+      if (isRouteLibraryOpenRef.current) {
+        const queryLayers = ['library-preview-line', 'library-suggestions-hit'].filter((id) =>
+          Boolean(map.getLayer(id)),
+        );
+        if (queryLayers.length > 0) {
+          const hitBox: [[number, number], [number, number]] = [
+            [e.point.x - 5, e.point.y - 5],
+            [e.point.x + 5, e.point.y + 5],
+          ];
+          const hits = map.queryRenderedFeatures(hitBox, { layers: queryLayers });
+          const hitId = Number(hits[0]?.properties?.id);
+          if (Number.isFinite(hitId) && hitId > 0) {
+            clearSingleClick();
+            hideMenu();
+            onSelectLibraryRouteRef.current?.(hitId);
+            return;
+          }
+        }
       }
       clearSingleClick();
       singleClickTimer = setTimeout(() => {
@@ -819,6 +976,16 @@ export const MapView: React.FC<MapViewProps> = ({
     map.on('mouseleave', 'nogo-areas-fill', () => (map.getCanvas().style.cursor = ''));
     map.on('mouseenter', 'nogo-areas-center', () => (map.getCanvas().style.cursor = 'pointer'));
     map.on('mouseleave', 'nogo-areas-center', () => (map.getCanvas().style.cursor = ''));
+    map.on('mouseenter', 'library-suggestions-hit', () => {
+      if (draggingMarkerIndexRef.current === null && !insertDragRef.current?.hasDragged) {
+        map.getCanvas().style.cursor = 'pointer';
+      }
+    });
+    map.on('mouseleave', 'library-suggestions-hit', () => {
+      if (!insertDragRef.current?.hasDragged) {
+        map.getCanvas().style.cursor = '';
+      }
+    });
 
     return () => {
       window.removeEventListener('mouseup', finishInsert);
@@ -826,6 +993,8 @@ export const MapView: React.FC<MapViewProps> = ({
       markersRef.current = [];
       warningMarkersRef.current.forEach((m) => m.remove());
       warningMarkersRef.current = [];
+      libraryRankMarkersRef.current.forEach(({ marker }) => marker.remove());
+      libraryRankMarkersRef.current = [];
       hoverMarkerRef.current?.remove();
       hoverMarkerRef.current = null;
       map.remove();
@@ -878,6 +1047,74 @@ export const MapView: React.FC<MapViewProps> = ({
       syncHighlightLayer(mapRef.current, segmentHighlight);
     }
   }, [segmentHighlight]);
+
+  // Create/remove Top 5 numbered rank markers only when the suggested set or open state changes
+  useEffect(() => {
+    const map = mapRef.current;
+    libraryRankMarkersRef.current.forEach(({ marker }) => marker.remove());
+    libraryRankMarkersRef.current = [];
+    if (!map || !isRouteLibraryOpen || suggestedLibraryTracks.length === 0) return;
+
+    // Add #5 down to #1 so #1 stacks visually above lower ranks when start points coincide
+    for (let i = suggestedLibraryTracks.length - 1; i >= 0; i--) {
+      const item = suggestedLibraryTracks[i];
+      if (item.coordinates.length === 0) continue;
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'library-rank-marker';
+      el.style.backgroundColor = item.color.badge;
+      el.textContent = String(item.rank);
+      el.title = `#${item.rank}: ${item.route.name}`;
+      el.setAttribute('aria-label', `Route suggestion ${item.rank}: ${item.route.name}`);
+
+      el.addEventListener('mouseenter', () => {
+        onHoverLibraryRouteRef.current?.(item.route);
+      });
+      el.addEventListener('mouseleave', () => {
+        onHoverLibraryRouteRef.current?.(null);
+      });
+      el.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        hideMenu();
+        onSelectLibraryRouteRef.current?.(item.route.id);
+      });
+
+      const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+        .setLngLat(item.coordinates[0])
+        .addTo(map);
+      libraryRankMarkersRef.current.push({ routeId: item.route.id, marker });
+    }
+  }, [isRouteLibraryOpen, suggestedLibraryTracks]);
+
+  // Sync library WebGL polylines and update rank marker dim/focus classes in place
+  useEffect(() => {
+    const map = mapRef.current;
+    const focusedId = activeLibraryPreview?.route.id ?? null;
+    for (const { routeId, marker } of libraryRankMarkersRef.current) {
+      const el = marker.getElement();
+      const isFocused = focusedId === routeId;
+      const isDimmed = !isFocused && libraryDimLevel !== 'none';
+      el.classList.toggle('is-focused', isFocused);
+      el.classList.toggle('is-dimmed', isDimmed);
+    }
+    if (!map || !styleReadyRef.current) return;
+    syncLibraryLayers(
+      map,
+      isRouteLibraryOpen,
+      suggestedLibraryTracks,
+      activeLibraryPreview,
+      libraryDimLevel,
+    );
+  }, [isRouteLibraryOpen, suggestedLibraryTracks, activeLibraryPreview, libraryDimLevel]);
+
+  // Fit bounds to a library preview ONLY when explicitly requested via frameLibraryPreviewSeq
+  useEffect(() => {
+    if (frameLibraryPreviewSeq === 0) return;
+    const map = mapRef.current;
+    const preview = activeLibraryPreviewRef.current;
+    if (!map || !styleReadyRef.current || !preview || preview.coordinates.length === 0) return;
+    fitCoordinatesBounds(map, preview.coordinates, true);
+  }, [frameLibraryPreviewSeq]);
 
   // Update styles when basemap/offline mode changes
   const prevStylePropsRef = useRef({ isOfflineMode, basemap, thunderforestKey });

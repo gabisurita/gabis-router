@@ -19,7 +19,8 @@ try {
 const certDir = path.join(__dirname, '.cert');
 const keyPath = path.join(certDir, 'key.pem');
 const certPath = path.join(certDir, 'cert.pem');
-const hasHttpsCerts = fs.existsSync(keyPath) && fs.existsSync(certPath);
+const hasHttpsCerts =
+  process.env.VITE_HTTP !== '1' && fs.existsSync(keyPath) && fs.existsSync(certPath);
 
 // Map tile archives. Outside public/ on purpose: they are over 1 GB and must not be
 // copied into dist/ on every build.
@@ -78,6 +79,18 @@ const serveMapTiles: Connect.NextHandleFunction = async (req, res, next) => {
   }
 
   const rawUrl = req.url.split('?')[0];
+  if (rawUrl === '/map-tiles/__available.json') {
+    const files = fs.existsSync(mapTilesDir)
+      ? fs
+          .readdirSync(mapTilesDir)
+          .filter((f) => f.endsWith('.pmtiles'))
+          .map((f) => f.replace(/\.pmtiles$/, ''))
+      : [];
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(files));
+    return;
+  }
   const segMatch = rawUrl.match(/^\/map-tiles\/(([EW])(\d+)_([NS])(\d+))\.pmtiles$/);
   const cycleMatch = rawUrl.match(/^\/map-tiles\/(cycle_routes)\.pmtiles$/);
   if (!segMatch && !cycleMatch) {
@@ -91,7 +104,7 @@ const serveMapTiles: Connect.NextHandleFunction = async (req, res, next) => {
   const localPath = path.join(mapTilesDir, `${segmentId}.pmtiles`);
 
   if (!fs.existsSync(localPath)) {
-    if (!segMatch) {
+    if (!segMatch || process.env.EXTRACT_MISSING_PMTILES !== '1') {
       res.statusCode = 404;
       res.setHeader('Content-Type', 'text/plain');
       res.end(`Missing ${segmentId}.pmtiles in web/map-tiles/`);

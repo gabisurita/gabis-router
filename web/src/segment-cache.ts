@@ -21,7 +21,9 @@ export const UK_SEGMENTS = [
 export const CYCLE_ROUTES_ARCHIVE = 'cycle_routes';
 export const OFFLINE_PMTILES_ARCHIVES = [...UK_SEGMENTS, CYCLE_ROUTES_ARCHIVE];
 
-const UK_SEGMENT_BOUNDS: ReadonlyArray<readonly [string, number, number, number, number]> = [
+export const R2_PMTILES_SEGMENT_BOUNDS: ReadonlyArray<
+  readonly [string, number, number, number, number]
+> = [
   ['W5_N50', -5, 50, 0, 55],
   ['E0_N50', 0, 50, 5, 55],
   ['W5_N55', -5, 55, 0, 60],
@@ -30,25 +32,59 @@ const UK_SEGMENT_BOUNDS: ReadonlyArray<readonly [string, number, number, number,
   ['W15_N50', -15, 50, -10, 55],
   ['W5_N60', -5, 60, 0, 65],
   ['W50_S25', -50, -25, -45, -20],
+  ['W55_S25', -55, -25, -50, -20],
+  ['W50_S20', -50, -20, -45, -15],
+  ['W55_S20', -55, -20, -50, -15],
 ];
 
-/**
- * Returns the 5°×5° segment IDs whose bounding box intersects Web Mercator tile (z, x, y).
- */
-export function segmentsForTile(z: number, x: number, y: number): string[] {
+export function tileLonLatBounds(
+  z: number,
+  x: number,
+  y: number,
+): readonly [number, number, number, number] {
   const n = 2 ** z;
   const minLon = (x / n) * 360 - 180;
   const maxLon = ((x + 1) / n) * 360 - 180;
   const maxLat = (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
   const minLat = (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
+  return [minLon, minLat, maxLon, maxLat];
+}
+
+/**
+ * Returns the 5°×5° segment IDs whose bounding box intersects Web Mercator tile (z, x, y).
+ */
+export function segmentsForTile(z: number, x: number, y: number): string[] {
+  const [minLon, minLat, maxLon, maxLat] = tileLonLatBounds(z, x, y);
 
   const matches: string[] = [];
-  for (const [id, sMinLon, sMinLat, sMaxLon, sMaxLat] of UK_SEGMENT_BOUNDS) {
+  for (const [id, sMinLon, sMinLat, sMaxLon, sMaxLat] of R2_PMTILES_SEGMENT_BOUNDS) {
     if (maxLon >= sMinLon && minLon <= sMaxLon && maxLat >= sMinLat && minLat <= sMaxLat) {
       matches.push(id);
     }
   }
   return matches;
+}
+
+/**
+ * Returns true if Web Mercator tile (z, x, y) lies strictly inside the given segment's 5°×5° box.
+ */
+export function isTileStrictlyInsideSegment(
+  z: number,
+  x: number,
+  y: number,
+  segmentId: string,
+): boolean {
+  const entry = R2_PMTILES_SEGMENT_BOUNDS.find((b) => b[0] === segmentId);
+  if (!entry) return false;
+  const [, sMinLon, sMinLat, sMaxLon, sMaxLat] = entry;
+  const [minLon, minLat, maxLon, maxLat] = tileLonLatBounds(z, x, y);
+  const eps = 0.01;
+  return (
+    minLon > sMinLon + eps &&
+    maxLon < sMaxLon - eps &&
+    minLat > sMinLat + eps &&
+    maxLat < sMaxLat - eps
+  );
 }
 
 export function isHtml(res: Response): boolean {

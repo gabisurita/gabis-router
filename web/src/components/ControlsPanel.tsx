@@ -26,6 +26,9 @@ interface ControlsPanelProps {
   onToggleCollapse: () => void;
   isProfileEditorOpen: boolean;
   onToggleProfileEditor: () => void;
+  isRouteLibraryOpen: boolean;
+  onToggleRouteLibrary: () => void;
+  routeLibraryNode?: React.ReactNode;
   onOpenSettings: () => void;
   onOpenAbout: () => void;
   getMapCenter?: () => { lat: number; lon: number };
@@ -41,6 +44,9 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   onToggleCollapse,
   isProfileEditorOpen,
   onToggleProfileEditor,
+  isRouteLibraryOpen,
+  onToggleRouteLibrary,
+  routeLibraryNode,
   onOpenSettings,
   onOpenAbout,
   getMapCenter,
@@ -168,7 +174,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
     <div
       id="controls"
       ref={controlsRef}
-      className={`${isCollapsed ? 'collapsed' : ''} ${!isCollapsed && isProfileEditorOpen ? 'editor-open' : ''}`}
+      className={`${isCollapsed ? 'collapsed' : ''} ${!isCollapsed && isProfileEditorOpen ? 'editor-open' : ''} ${!isCollapsed && isRouteLibraryOpen ? 'library-open' : ''}`}
     >
       <div className="controls-main-col">
         <Header
@@ -190,6 +196,20 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
             title="Expand sidebar"
             onClick={onToggleCollapse}
           >
+            <button
+              id="btn-rail-route-library"
+              type="button"
+              className="rail-action-btn"
+              title="Browse route library"
+              aria-label="Browse route library"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleRouteLibrary();
+              }}
+            >
+              <Icon name="book" size={16} />
+            </button>
+            <span className="sidebar-rail-divider" aria-hidden="true" />
             <div className="sidebar-rail-slots">
               {routing.slots.map((slot, slotIdx) => {
                 const slotColor = getSlotColor(slot, slotIdx);
@@ -336,28 +356,40 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                 );
               })}
             </div>
-            {routing.routeCount < MAX_ROUTES && (
-              <div className="route-tabs-actions">
-                <button
-                  id="btn-add-route"
-                  type="button"
-                  className="btn-toolbar-mini btn-add-route"
-                  title="Add a new empty route with its own profile selector"
-                  onClick={() => routing.addRoute('empty')}
-                >
-                  <span>+ Route</span>
-                </button>
-                <button
-                  id="btn-clone-route"
-                  type="button"
-                  className="btn-toolbar-mini btn-clone-route"
-                  title="Clone current route waypoints and profile into a new route"
-                  onClick={() => routing.addRoute('clone')}
-                >
-                  <span>Clone</span>
-                </button>
-              </div>
-            )}
+            <div className="route-tabs-actions">
+              <button
+                id="btn-open-route-library"
+                type="button"
+                className={`btn-toolbar-mini btn-route-library ${isRouteLibraryOpen ? 'active' : ''}`}
+                title={isRouteLibraryOpen ? 'Close Route Library' : 'Browse curated UK and Ireland routes'}
+                onClick={onToggleRouteLibrary}
+              >
+                <Icon name="book" size={12} />
+                <span>Library</span>
+              </button>
+              {routing.routeCount < MAX_ROUTES && (
+                <>
+                  <button
+                    id="btn-add-route"
+                    type="button"
+                    className="btn-toolbar-mini btn-add-route"
+                    title="Add a new empty route with its own profile selector"
+                    onClick={() => routing.addRoute('empty')}
+                  >
+                    <span>+ Route</span>
+                  </button>
+                  <button
+                    id="btn-clone-route"
+                    type="button"
+                    className="btn-toolbar-mini btn-clone-route"
+                    title="Clone current route waypoints and profile into a new route"
+                    onClick={() => routing.addRoute('clone')}
+                  >
+                    <span>Clone</span>
+                  </button>
+                </>
+              )}
+            </div>
           </div>
 
           <div className="field profile-field">
@@ -619,6 +651,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
       {!isCollapsed && isProfileEditorOpen && (
         <ProfileEditorPanel routing={routing} onClose={onToggleProfileEditor} />
       )}
+      {!isCollapsed && isRouteLibraryOpen && routeLibraryNode}
     </div>
   );
 };

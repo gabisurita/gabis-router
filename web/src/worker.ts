@@ -14,7 +14,25 @@ import {
 const MAX_CACHED_CELLS = 2500;
 const MAX_CACHED_DESCRIPTIONS = 250_000;
 const CANCELLED_ERR = '__CANCELLED__';
-const UK_SEGMENT_SET = new Set<string>([...UK_SEGMENTS, 'W50_S25']);
+const R2_RD5_SEGMENT_SET = new Set<string>([
+  ...UK_SEGMENTS,
+  // Europe (including Atlantic islands)
+  'E0_N35', 'E0_N40', 'E0_N45', 'E0_N50', 'E0_N55', 'E0_N60',
+  'E5_N35', 'E5_N40', 'E5_N45', 'E5_N50', 'E5_N55', 'E5_N60',
+  'E10_N35', 'E10_N40', 'E10_N45', 'E10_N50', 'E10_N55', 'E10_N60', 'E10_N65',
+  'E15_N35', 'E15_N40', 'E15_N45', 'E15_N50', 'E15_N55', 'E15_N60', 'E15_N65', 'E15_N70',
+  'E20_N35', 'E20_N40', 'E20_N45', 'E20_N50', 'E20_N55', 'E20_N60', 'E20_N65', 'E20_N70',
+  'E25_N35', 'E25_N40', 'E25_N45', 'E25_N50', 'E25_N55', 'E25_N60', 'E25_N65', 'E25_N70',
+  'E30_N35', 'E30_N40', 'E30_N45', 'E30_N50', 'E30_N55', 'E30_N60', 'E30_N65', 'E30_N70',
+  'W5_N35', 'W5_N40', 'W5_N45', 'W5_N50', 'W5_N55', 'W5_N60',
+  'W10_N35', 'W10_N40', 'W10_N45', 'W10_N50', 'W10_N55', 'W10_N60', 'W10_N70',
+  'W15_N25', 'W15_N50', 'W15_N60', 'W15_N65',
+  'W20_N25', 'W20_N30', 'W20_N60', 'W20_N65', 'W20_N70',
+  'W25_N60', 'W25_N65', 'W25_N70',
+  'W30_N35',
+  // Sao Paulo State & borders
+  'W45_S25', 'W50_S20', 'W50_S25', 'W50_S30', 'W55_S20', 'W55_S25',
+]);
 
 let router: WasmRouter | null = null;
 // Safeguard 2 (Shared WebAssembly.Module):
@@ -167,7 +185,7 @@ async function openSegmentBlob(
   if (!required && failedSegments.has(name)) {
     return false;
   }
-  if (!required && !UK_SEGMENT_SET.has(name)) {
+  if (!required && !R2_RD5_SEGMENT_SET.has(name)) {
     // Coastal routes near 50N such as Brighton can expand A* south into W5_N45 or E0_N45 when
     // road penalties are high. Those tiles are outside the UK and Ireland dataset on R2.
     // Skip non-required out-of-coverage tiles immediately to avoid wasted probes and graph resets.

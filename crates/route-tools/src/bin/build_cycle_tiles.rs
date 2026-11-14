@@ -7,22 +7,36 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{self, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 
 use brouter_rs::dsl::lookups::LookupData;
 use brouter_rs::rd5::tile_manager::TileManager;
+use flate2::read::GzDecoder;
 
-const UK_SEGMENTS: &[(&str, i32, i32)] = &[
-    ("W15_N50", -15, 50),
-    ("W10_N50", -10, 50),
-    ("W10_N55", -10, 55),
-    ("W5_N50", -5, 50),
-    ("W5_N55", -5, 55),
-    ("W5_N60", -5, 60),
-    ("E0_N50", 0, 50),
-    ("W50_S25", -50, -25),
-];
+fn parse_segment_stem(stem: &str) -> Option<(i32, i32)> {
+    let (lon_part, lat_part) = stem.split_once('_')?;
+    let lon_sign = match lon_part.chars().next()? {
+        'W' => -1,
+        'E' => 1,
+        _ => return None,
+    };
+    let lat_sign = match lat_part.chars().next()? {
+        'S' => -1,
+        'N' => 1,
+        _ => return None,
+    };
+    let lon_val: i32 = lon_part[1..].parse().ok()?;
+    let lat_val: i32 = lat_part[1..].parse().ok()?;
+    Some((lon_sign * lon_val, lat_sign * lat_val))
+}
+
+fn gunzip_bytes(gz: &[u8]) -> io::Result<Vec<u8>> {
+    let mut dec = GzDecoder::new(gz);
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out)?;
+    Ok(out)
+}
 
 const MIN_ZOOM: u8 = 5;
 const MAX_ZOOM: u8 = 11;
@@ -161,6 +175,122 @@ fn zxy_to_tile_id(z: u8, x: u32, y: u32) -> u64 {
         s >>= 1;
     }
     acc
+}
+
+fn read_varint(buf: &[u8], pos: &mut usize) -> io::Result<u64> {
+    let mut res = 0u64;
+    let mut shift = 0u32;
+    loop {
+        if *pos >= buf.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "varint EOF"));
+        }
+        let b = buf[*pos];
+        *pos += 1;
+        res |= ((b & 0x7f) as u64) << shift;
+        if (b & 0x80) == 0 {
+            return Ok(res);
+        }
+        shift += 7;
+    }
+}
+
+fn unzigzag(n: u64) -> i32 {
+    let n32 = n as u32;
+    ((n32 >> 1) as i32) ^ -((n32 & 1) as i32)
+}
+
+fn tile_id_to_zoom(tile_id: u64) -> u8 {
+    let mut z = 0u8;
+    while (((1u64 << (2 * ((z as u64) + 1))) - 1) / 3) <= tile_id {
+        z += 1;
+    }
+    z
+}
+
+fn dp_tolerance_for_zoom(z: u8) -> f64 {
+    if z < MAX_ZOOM {
+        2.0 // 0.25 CSS pixels on a 512px (4096-extent) tile
+    } else {
+        0.45 // collinear-only cleanup on z11 overzoomed tiles
+    }
+}
+
+fn simplify_open_dp(s: &[(i32, i32)], tol_sq: f64) -> Vec<(i32, i32)> {
+    if s.len() <= 2 {
+        return s.to_vec();
+    }
+    let mut keep = vec![false; s.len()];
+    keep[0] = true;
+    keep[s.len() - 1] = true;
+    let mut stack = vec![(0usize, s.len() - 1)];
+
+    while let Some((a, b)) = stack.pop() {
+        if b <= a + 1 {
+            continue;
+        }
+        let (ax, ay) = (s[a].0 as f64, s[a].1 as f64);
+        let (bx, by) = (s[b].0 as f64, s[b].1 as f64);
+        let dx = bx - ax;
+        let dy = by - ay;
+        let len_sq = dx * dx + dy * dy;
+
+        let mut max_d2 = -1.0f64;
+        let mut best_i = a;
+        for (i, &(px_i, py_i)) in s.iter().enumerate().take(b).skip(a + 1) {
+            let (px, py) = (px_i as f64, py_i as f64);
+            let d2 = if len_sq == 0.0 {
+                (px - ax) * (px - ax) + (py - ay) * (py - ay)
+            } else {
+                let t = (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0);
+                let cx = ax + t * dx;
+                let cy = ay + t * dy;
+                (px - cx) * (px - cx) + (py - cy) * (py - cy)
+            };
+            if d2 > max_d2 {
+                max_d2 = d2;
+                best_i = i;
+            }
+        }
+        if max_d2 > tol_sq {
+            keep[best_i] = true;
+            stack.push((a, best_i));
+            stack.push((best_i, b));
+        }
+    }
+
+    s.iter()
+        .enumerate()
+        .filter_map(|(i, &pt)| if keep[i] { Some(pt) } else { None })
+        .collect()
+}
+
+fn simplify_polyline(pts: &[(i32, i32)], tol: f64) -> Vec<(i32, i32)> {
+    if pts.len() <= 2 || tol <= 0.0 {
+        return pts.to_vec();
+    }
+    let tol_sq = tol * tol;
+    if pts.len() >= 4 && pts.first() == pts.last() {
+        let (x0, y0) = (pts[0].0 as f64, pts[0].1 as f64);
+        let mut mid = 1usize;
+        let mut max_d2 = -1.0f64;
+        for (i, &(px, py)) in pts.iter().enumerate().take(pts.len() - 1).skip(1) {
+            let dx = (px as f64) - x0;
+            let dy = (py as f64) - y0;
+            let d2 = dx * dx + dy * dy;
+            if d2 > max_d2 {
+                max_d2 = d2;
+                mid = i;
+            }
+        }
+        if max_d2 <= tol_sq {
+            return Vec::new();
+        }
+        let mut first_half = simplify_open_dp(&pts[..=mid], tol_sq);
+        let second_half = simplify_open_dp(&pts[mid..], tol_sq);
+        first_half.extend_from_slice(&second_half[1..]);
+        return first_half;
+    }
+    simplify_open_dp(pts, tol_sq)
 }
 
 fn write_varint(buf: &mut Vec<u8>, mut val: u64) {
@@ -370,6 +500,388 @@ fn encode_mvt_tile(
     tile
 }
 
+fn deserialize_directory(buf: &[u8]) -> io::Result<Vec<DirEntry>> {
+    let mut pos = 0usize;
+    let n = read_varint(buf, &mut pos)? as usize;
+    let mut tile_ids = Vec::with_capacity(n);
+    let mut last_id = 0u64;
+    for _ in 0..n {
+        last_id += read_varint(buf, &mut pos)?;
+        tile_ids.push(last_id);
+    }
+    let mut run_lengths = Vec::with_capacity(n);
+    for _ in 0..n {
+        run_lengths.push(read_varint(buf, &mut pos)? as u32);
+    }
+    let mut lengths = Vec::with_capacity(n);
+    for _ in 0..n {
+        lengths.push(read_varint(buf, &mut pos)? as u32);
+    }
+    let mut entries = Vec::with_capacity(n);
+    let mut prev_end = 0u64;
+    for i in 0..n {
+        let raw_off = read_varint(buf, &mut pos)?;
+        let offset = if i > 0 && raw_off == 0 {
+            prev_end
+        } else {
+            raw_off.saturating_sub(1)
+        };
+        prev_end = offset + (lengths[i] as u64);
+        entries.push(DirEntry {
+            tile_id: tile_ids[i],
+            offset,
+            length: lengths[i],
+            run_length: run_lengths[i],
+        });
+    }
+    Ok(entries)
+}
+
+fn write_uncompressed_pmtiles(
+    out_path: &Path,
+    encoded_tiles: &BTreeMap<u64, Vec<u8>>,
+    min_lon_e7: i32,
+    min_lat_e7: i32,
+    max_lon_e7: i32,
+    max_lat_e7: i32,
+) -> io::Result<()> {
+    let mut leaf_entries = Vec::with_capacity(encoded_tiles.len());
+    let mut tile_data = Vec::new();
+    for (&tile_id, bytes) in encoded_tiles {
+        let offset = tile_data.len() as u64;
+        let length = bytes.len() as u32;
+        tile_data.extend_from_slice(bytes);
+        leaf_entries.push(DirEntry {
+            tile_id,
+            offset,
+            length,
+            run_length: 1,
+        });
+    }
+
+    let mut leaf_dir_bytes = Vec::new();
+    let mut root_entries = Vec::new();
+    for chunk in leaf_entries.chunks(4096) {
+        let raw_leaf = serialize_directory(chunk);
+        let offset = leaf_dir_bytes.len() as u64;
+        let length = raw_leaf.len() as u32;
+        leaf_dir_bytes.extend_from_slice(&raw_leaf);
+        root_entries.push(DirEntry {
+            tile_id: chunk[0].tile_id,
+            offset,
+            length,
+            run_length: 0,
+        });
+    }
+    let root_dir_bytes = serialize_directory(&root_entries);
+    let metadata_bytes = br#"{"name":"rsrouter-cycle-routes","description":"OSM cycling routes (ICN, NCN, RCN, LCN, MTB)","version":"1.0.0","type":"overlay","format":"pbf","vector_layers":[{"id":"cycle_routes","fields":{"network":"String","state":"String","ref":"String"},"minzoom":5,"maxzoom":11}]}"#;
+
+    let root_dir_offset = 127u64;
+    let root_dir_len = root_dir_bytes.len() as u64;
+    let metadata_offset = root_dir_offset + root_dir_len;
+    let metadata_len = metadata_bytes.len() as u64;
+    let leaf_dir_offset = metadata_offset + metadata_len;
+    let leaf_dir_len = leaf_dir_bytes.len() as u64;
+    let tile_data_offset = leaf_dir_offset + leaf_dir_len;
+    let tile_data_len = tile_data.len() as u64;
+    let num_tiles = leaf_entries.len() as u64;
+
+    let mut header = [0u8; 127];
+    header[0..7].copy_from_slice(b"PMTiles");
+    header[7] = 3; // spec_version = 3
+    header[8..16].copy_from_slice(&root_dir_offset.to_le_bytes());
+    header[16..24].copy_from_slice(&root_dir_len.to_le_bytes());
+    header[24..32].copy_from_slice(&metadata_offset.to_le_bytes());
+    header[32..40].copy_from_slice(&metadata_len.to_le_bytes());
+    header[40..48].copy_from_slice(&leaf_dir_offset.to_le_bytes());
+    header[48..56].copy_from_slice(&leaf_dir_len.to_le_bytes());
+    header[56..64].copy_from_slice(&tile_data_offset.to_le_bytes());
+    header[64..72].copy_from_slice(&tile_data_len.to_le_bytes());
+    header[72..80].copy_from_slice(&num_tiles.to_le_bytes());
+    header[80..88].copy_from_slice(&num_tiles.to_le_bytes());
+    header[88..96].copy_from_slice(&num_tiles.to_le_bytes());
+    header[96] = 1; // clustered = true
+    header[97] = 1; // internal_compression = None (1)
+    header[98] = 1; // tile_compression = None (1)
+    header[99] = 1; // tile_type = Mvt (1)
+    header[100] = MIN_ZOOM;
+    header[101] = MAX_ZOOM;
+    header[102..106].copy_from_slice(&min_lon_e7.to_le_bytes());
+    header[106..110].copy_from_slice(&min_lat_e7.to_le_bytes());
+    header[110..114].copy_from_slice(&max_lon_e7.to_le_bytes());
+    header[114..118].copy_from_slice(&max_lat_e7.to_le_bytes());
+    header[118] = 6; // centerZoom = 6
+    header[119..123].copy_from_slice(&(-25_000_000i32).to_le_bytes());
+    header[123..127].copy_from_slice(&(540_000_000i32).to_le_bytes());
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = out_path.with_extension("pmtiles.tmp");
+    {
+        let mut f = BufWriter::new(File::create(&tmp_path)?);
+        f.write_all(&header)?;
+        f.write_all(&root_dir_bytes)?;
+        f.write_all(metadata_bytes)?;
+        f.write_all(&leaf_dir_bytes)?;
+        f.write_all(&tile_data)?;
+        f.flush()?;
+    }
+    fs::rename(&tmp_path, out_path)?;
+
+    eprintln!(
+        "Wrote {:?} ({} tiles, {:.2} MiB)",
+        out_path,
+        num_tiles,
+        (tile_data_offset + tile_data_len) as f64 / (1024.0 * 1024.0)
+    );
+    Ok(())
+}
+
+fn decode_and_simplify_mvt(raw_tile: &[u8], tol: f64) -> io::Result<Vec<u8>> {
+    let mut pos = 0usize;
+    let mut layer_slice: Option<&[u8]> = None;
+    while pos < raw_tile.len() {
+        let tag = read_varint(raw_tile, &mut pos)?;
+        let field = tag >> 3;
+        let wire = tag & 7;
+        if wire == 2 {
+            let len = read_varint(raw_tile, &mut pos)? as usize;
+            let bytes = &raw_tile[pos..pos + len];
+            pos += len;
+            if field == 3 {
+                layer_slice = Some(bytes);
+            }
+        } else if wire == 0 {
+            let _ = read_varint(raw_tile, &mut pos)?;
+        } else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected MVT wire type"));
+        }
+    }
+    let Some(layer) = layer_slice else {
+        return Ok(Vec::new());
+    };
+
+    let mut keys: Vec<String> = Vec::new();
+    let mut vals: Vec<String> = Vec::new();
+    let mut features: Vec<&[u8]> = Vec::new();
+    let mut lpos = 0usize;
+    while lpos < layer.len() {
+        let tag = read_varint(layer, &mut lpos)?;
+        let field = tag >> 3;
+        let wire = tag & 7;
+        if wire == 2 {
+            let len = read_varint(layer, &mut lpos)? as usize;
+            let bytes = &layer[lpos..lpos + len];
+            lpos += len;
+            match field {
+                2 => features.push(bytes),
+                3 => keys.push(String::from_utf8_lossy(bytes).into_owned()),
+                4 => {
+                    let mut vpos = 0usize;
+                    let mut s = String::new();
+                    while vpos < bytes.len() {
+                        let vtag = read_varint(bytes, &mut vpos)?;
+                        if (vtag >> 3) == 1 && (vtag & 7) == 2 {
+                            let slen = read_varint(bytes, &mut vpos)? as usize;
+                            s = String::from_utf8_lossy(&bytes[vpos..vpos + slen]).into_owned();
+                            vpos += slen;
+                        } else if (vtag & 7) == 0 {
+                            let _ = read_varint(bytes, &mut vpos)?;
+                        } else {
+                            break;
+                        }
+                    }
+                    vals.push(s);
+                }
+                _ => {}
+            }
+        } else if wire == 0 {
+            let _ = read_varint(layer, &mut lpos)?;
+        } else {
+            break;
+        }
+    }
+
+    let mut ref_strings: Vec<String> = Vec::new();
+    let mut ref_lookup: HashMap<String, u32> = HashMap::new();
+    let mut groups: BTreeMap<(CycleNetwork, bool, u32), Vec<Vec<(i32, i32)>>> = BTreeMap::new();
+
+    for feat in features {
+        let mut fpos = 0usize;
+        let mut tags_slice: &[u8] = &[];
+        let mut geom_slice: &[u8] = &[];
+        while fpos < feat.len() {
+            let tag = read_varint(feat, &mut fpos)?;
+            let field = tag >> 3;
+            let wire = tag & 7;
+            if wire == 2 {
+                let len = read_varint(feat, &mut fpos)? as usize;
+                let bytes = &feat[fpos..fpos + len];
+                fpos += len;
+                if field == 2 {
+                    tags_slice = bytes;
+                } else if field == 4 {
+                    geom_slice = bytes;
+                }
+            } else if wire == 0 {
+                let _ = read_varint(feat, &mut fpos)?;
+            } else {
+                break;
+            }
+        }
+
+        let mut net = CycleNetwork::Lcn;
+        let mut proposed = false;
+        let mut ref_idx = 0u32;
+        let mut tpos = 0usize;
+        while tpos < tags_slice.len() {
+            let k = read_varint(tags_slice, &mut tpos)? as usize;
+            let v = read_varint(tags_slice, &mut tpos)? as usize;
+            let k_str = keys.get(k).map(|s| s.as_str()).unwrap_or("");
+            let v_str = vals.get(v).map(|s| s.as_str()).unwrap_or("");
+            match k_str {
+                "network" => {
+                    net = match v_str {
+                        "icn" => CycleNetwork::Icn,
+                        "ncn" => CycleNetwork::Ncn,
+                        "rcn" => CycleNetwork::Rcn,
+                        "mtb" => CycleNetwork::Mtb,
+                        _ => CycleNetwork::Lcn,
+                    };
+                }
+                "state" => {
+                    proposed = v_str == "proposed";
+                }
+                "ref" if !v_str.is_empty() => {
+                    ref_idx = *ref_lookup.entry(v_str.to_string()).or_insert_with(|| {
+                        ref_strings.push(v_str.to_string());
+                        ref_strings.len() as u32
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let mut lines: Vec<Vec<(i32, i32)>> = Vec::new();
+        let mut cur_line: Vec<(i32, i32)> = Vec::new();
+        let mut cx = 0i32;
+        let mut cy = 0i32;
+        let mut gpos = 0usize;
+        while gpos < geom_slice.len() {
+            let cmd_int = read_varint(geom_slice, &mut gpos)?;
+            let cmd = cmd_int & 0x7;
+            let count = (cmd_int >> 3) as usize;
+            if cmd == 1 {
+                for _ in 0..count {
+                    if cur_line.len() >= 2 {
+                        let simp = simplify_polyline(&cur_line, tol);
+                        if simp.len() >= 2 {
+                            lines.push(simp);
+                        }
+                    }
+                    cur_line.clear();
+                    cx += unzigzag(read_varint(geom_slice, &mut gpos)?);
+                    cy += unzigzag(read_varint(geom_slice, &mut gpos)?);
+                    cur_line.push((cx, cy));
+                }
+            } else if cmd == 2 {
+                for _ in 0..count {
+                    cx += unzigzag(read_varint(geom_slice, &mut gpos)?);
+                    cy += unzigzag(read_varint(geom_slice, &mut gpos)?);
+                    cur_line.push((cx, cy));
+                }
+            } else {
+                break;
+            }
+        }
+        if cur_line.len() >= 2 {
+            let simp = simplify_polyline(&cur_line, tol);
+            if simp.len() >= 2 {
+                lines.push(simp);
+            }
+        }
+        if !lines.is_empty() {
+            groups.entry((net, proposed, ref_idx)).or_default().extend(lines);
+        }
+    }
+
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(encode_mvt_tile(&groups, &ref_strings))
+}
+
+fn repack_existing_pmtiles(in_path: &Path, out_path: &Path) -> io::Result<()> {
+    let raw = fs::read(in_path)?;
+    if raw.len() < 127 || &raw[0..7] != b"PMTiles" {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid PMTiles header"));
+    }
+    let u64_at = |o: usize| u64::from_le_bytes(raw[o..o + 8].try_into().unwrap());
+    let i32_at = |o: usize| i32::from_le_bytes(raw[o..o + 4].try_into().unwrap());
+    let root_off = u64_at(8) as usize;
+    let root_len = u64_at(16) as usize;
+    let leaf_off = u64_at(40) as usize;
+    let tile_off = u64_at(56) as usize;
+    let internal_comp = raw[97];
+    let tile_comp = raw[98];
+    let min_lon_e7 = i32_at(102);
+    let min_lat_e7 = i32_at(106);
+    let max_lon_e7 = i32_at(110);
+    let max_lat_e7 = i32_at(114);
+
+    let root_slice = &raw[root_off..root_off + root_len];
+    let root_bytes = if internal_comp == 2 {
+        gunzip_bytes(root_slice)?
+    } else {
+        root_slice.to_vec()
+    };
+    let root_entries = deserialize_directory(&root_bytes)?;
+
+    let mut all_tiles = Vec::new();
+    for e in root_entries {
+        if e.run_length == 0 {
+            let l_start = leaf_off + (e.offset as usize);
+            let l_slice = &raw[l_start..l_start + (e.length as usize)];
+            let l_bytes = if internal_comp == 2 {
+                gunzip_bytes(l_slice)?
+            } else {
+                l_slice.to_vec()
+            };
+            all_tiles.extend(deserialize_directory(&l_bytes)?);
+        } else {
+            all_tiles.push(e);
+        }
+    }
+
+    eprintln!("Repacking {} tiles from {:?}...", all_tiles.len(), in_path);
+    let mut encoded_tiles: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+    for e in all_tiles {
+        let t_start = tile_off + (e.offset as usize);
+        let t_slice = &raw[t_start..t_start + (e.length as usize)];
+        let mvt_raw = if tile_comp == 2 {
+            gunzip_bytes(t_slice)?
+        } else {
+            t_slice.to_vec()
+        };
+        let z = tile_id_to_zoom(e.tile_id);
+        let tol = dp_tolerance_for_zoom(z);
+        let new_mvt = decode_and_simplify_mvt(&mvt_raw, tol)?;
+        if !new_mvt.is_empty() {
+            encoded_tiles.insert(e.tile_id, new_mvt);
+        }
+    }
+
+    write_uncompressed_pmtiles(
+        out_path,
+        &encoded_tiles,
+        min_lon_e7,
+        min_lat_e7,
+        max_lon_e7,
+        max_lat_e7,
+    )
+}
+
 struct DirEntry {
     tile_id: u64,
     offset: u64,
@@ -403,10 +915,23 @@ fn serialize_directory(entries: &[DirEntry]) -> Vec<u8> {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    let segments_dir = args
+    if args.get(1).map(|s| s.as_str()) == Some("--repack") {
+        let in_path = args
+            .get(2)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("web/map-tiles/cycle_routes.pmtiles"));
+        let out_path = args.get(3).map(PathBuf::from).unwrap_or_else(|| in_path.clone());
+        return repack_existing_pmtiles(&in_path, &out_path);
+    }
+    let segments_arg = args
         .get(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("data/segments4"));
+        .cloned()
+        .unwrap_or_else(|| "data/segments4".to_string());
+    let segment_dirs: Vec<PathBuf> = segments_arg
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| PathBuf::from(s.trim()))
+        .collect();
     let lookups_path = args
         .get(2)
         .map(PathBuf::from)
@@ -446,21 +971,46 @@ fn main() -> io::Result<()> {
         .filter_map(|k| way_lu.get_name_idx(k))
         .collect();
 
-    let mut tm = TileManager::with_cache_capacity(&segments_dir, 0);
+    let mut discovered: BTreeMap<String, (PathBuf, i32, i32)> = BTreeMap::new();
+    for dir in &segment_dirs {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rd5") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Some((base_lon, base_lat)) = parse_segment_stem(stem) {
+                discovered
+                    .entry(stem.to_string())
+                    .or_insert_with(|| (dir.clone(), base_lon, base_lat));
+            }
+        }
+    }
+
     let mut ld = vec![0i32; way_lu.names.len()];
     let mut ways: Vec<ExtractedWay> = Vec::new();
     let (ref_strings, seg_refs) = load_cycle_refs(std::path::Path::new("data/cycle_refs.bin"))?;
     let mut matched_ref_ways = 0usize;
+    let mut global_min_lon = i32::MAX;
+    let mut global_min_lat = i32::MAX;
+    let mut global_max_lon = i32::MIN;
+    let mut global_max_lat = i32::MIN;
 
-    for &(seg_name, base_lon, base_lat) in UK_SEGMENTS {
-        let seg_file = segments_dir.join(format!("{}.rd5", seg_name));
-        if !seg_file.exists() {
-            eprintln!("Skipping missing segment {:?}", seg_file);
-            continue;
-        }
+    for (seg_name, (seg_dir, base_lon, base_lat)) in &discovered {
+        let mut tm = TileManager::with_cache_capacity(seg_dir, 0);
+        global_min_lon = global_min_lon.min(*base_lon);
+        global_min_lat = global_min_lat.min(*base_lat);
+        global_max_lon = global_max_lon.max(*base_lon + 5);
+        global_max_lat = global_max_lat.max(*base_lat + 5);
         eprintln!("Scanning {}...", seg_name);
-        let lon_deg_base = base_lon + 180;
-        let lat_deg_base = base_lat + 90;
+        let lon_deg_base = *base_lon + 180;
+        let lat_deg_base = *base_lat + 90;
 
         for dlon in 0..5 {
             for dlat in 0..5 {
@@ -633,9 +1183,19 @@ fn main() -> io::Result<()> {
         }
 
         eprintln!("Zoom {}: {} non-empty tiles", z, z_tiles.len());
+        let tol = dp_tolerance_for_zoom(z);
         for ((tx, ty), mut groups) in z_tiles {
             for lines in groups.values_mut() {
-                *lines = merge_tile_lines(std::mem::take(lines));
+                let merged = merge_tile_lines(std::mem::take(lines));
+                *lines = merged
+                    .into_iter()
+                    .map(|pts| simplify_polyline(&pts, tol))
+                    .filter(|pts| pts.len() >= 2)
+                    .collect();
+            }
+            groups.retain(|_, lines| !lines.is_empty());
+            if groups.is_empty() {
+                continue;
             }
             let tile_id = zxy_to_tile_id(z, tx, ty);
             let mvt = encode_mvt_tile(&groups, &ref_strings);
@@ -643,86 +1203,33 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Build leaf directory and tile data payload
-    let mut leaf_entries = Vec::with_capacity(encoded_tiles.len());
-    let mut tile_data = Vec::new();
-    for (&tile_id, bytes) in &encoded_tiles {
-        let offset = tile_data.len() as u64;
-        let length = bytes.len() as u32;
-        tile_data.extend_from_slice(bytes);
-        leaf_entries.push(DirEntry {
-            tile_id,
-            offset,
-            length,
-            run_length: 1,
-        });
-    }
+    let min_lon_e7 = if global_min_lon <= global_max_lon {
+        global_min_lon * 10_000_000
+    } else {
+        -150_000_000
+    };
+    let min_lat_e7 = if global_min_lat <= global_max_lat {
+        global_min_lat * 10_000_000
+    } else {
+        500_000_000
+    };
+    let max_lon_e7 = if global_min_lon <= global_max_lon {
+        global_max_lon * 10_000_000
+    } else {
+        50_000_000
+    };
+    let max_lat_e7 = if global_min_lat <= global_max_lat {
+        global_max_lat * 10_000_000
+    } else {
+        650_000_000
+    };
 
-    let leaf_dir_bytes = serialize_directory(&leaf_entries);
-    let root_entries = vec![DirEntry {
-        tile_id: 0,
-        offset: 0,
-        length: leaf_dir_bytes.len() as u32,
-        run_length: 0,
-    }];
-    let root_dir_bytes = serialize_directory(&root_entries);
-
-    let metadata_json = br#"{"name":"rsrouter-cycle-routes","description":"UK and Ireland OSM cycling routes (ICN, NCN, RCN, LCN, MTB)","version":"1.0.0","type":"overlay","format":"pbf","vector_layers":[{"id":"cycle_routes","fields":{"network":"String","state":"String","ref":"String"},"minzoom":5,"maxzoom":11}]}"#;
-
-    let root_dir_offset = 127u64;
-    let root_dir_len = root_dir_bytes.len() as u64;
-    let metadata_offset = root_dir_offset + root_dir_len;
-    let metadata_len = metadata_json.len() as u64;
-    let leaf_dir_offset = metadata_offset + metadata_len;
-    let leaf_dir_len = leaf_dir_bytes.len() as u64;
-    let tile_data_offset = leaf_dir_offset + leaf_dir_len;
-    let tile_data_len = tile_data.len() as u64;
-    let num_tiles = leaf_entries.len() as u64;
-
-    let mut header = [0u8; 127];
-    header[0..7].copy_from_slice(b"PMTiles");
-    header[7] = 3; // spec_version = 3
-    header[8..16].copy_from_slice(&root_dir_offset.to_le_bytes());
-    header[16..24].copy_from_slice(&root_dir_len.to_le_bytes());
-    header[24..32].copy_from_slice(&metadata_offset.to_le_bytes());
-    header[32..40].copy_from_slice(&metadata_len.to_le_bytes());
-    header[40..48].copy_from_slice(&leaf_dir_offset.to_le_bytes());
-    header[48..56].copy_from_slice(&leaf_dir_len.to_le_bytes());
-    header[56..64].copy_from_slice(&tile_data_offset.to_le_bytes());
-    header[64..72].copy_from_slice(&tile_data_len.to_le_bytes());
-    header[72..80].copy_from_slice(&num_tiles.to_le_bytes());
-    header[80..88].copy_from_slice(&num_tiles.to_le_bytes());
-    header[88..96].copy_from_slice(&num_tiles.to_le_bytes());
-    header[96] = 1; // clustered = true
-    header[97] = 1; // internal_compression = None (1)
-    header[98] = 1; // tile_compression = None (1)
-    header[99] = 1; // tile_type = Mvt (1)
-    header[100] = MIN_ZOOM;
-    header[101] = MAX_ZOOM;
-    header[102..106].copy_from_slice(&(-500_000_000i32).to_le_bytes()); // minLon = -50.0
-    header[106..110].copy_from_slice(&(-250_000_000i32).to_le_bytes()); // minLat = -25.0
-    header[110..114].copy_from_slice(&(50_000_000i32).to_le_bytes()); // maxLon = 5.0
-    header[114..118].copy_from_slice(&(650_000_000i32).to_le_bytes()); // maxLat = 65.0
-    header[118] = 6; // centerZoom = 6
-    header[119..123].copy_from_slice(&(-25_000_000i32).to_le_bytes()); // centerLon = -2.5
-    header[123..127].copy_from_slice(&(540_000_000i32).to_le_bytes()); // centerLat = 54.0
-
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut f = BufWriter::new(File::create(&out_path)?);
-    f.write_all(&header)?;
-    f.write_all(&root_dir_bytes)?;
-    f.write_all(metadata_json)?;
-    f.write_all(&leaf_dir_bytes)?;
-    f.write_all(&tile_data)?;
-    f.flush()?;
-
-    eprintln!(
-        "Wrote {:?} ({} tiles, {:.2} MiB)",
-        out_path,
-        num_tiles,
-        (tile_data_offset + tile_data_len) as f64 / (1024.0 * 1024.0)
-    );
-    Ok(())
+    write_uncompressed_pmtiles(
+        &out_path,
+        &encoded_tiles,
+        min_lon_e7,
+        min_lat_e7,
+        max_lon_e7,
+        max_lat_e7,
+    )
 }

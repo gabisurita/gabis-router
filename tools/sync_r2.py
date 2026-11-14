@@ -115,6 +115,8 @@ def build_cycle_routes_pmtiles():
         "cargo",
         "run",
         "--release",
+        "--features",
+        "cli",
         "--manifest-path",
         str(REPO_ROOT / "crates" / "route-tools" / "Cargo.toml"),
         "--bin",
