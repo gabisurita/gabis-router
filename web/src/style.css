@@ -1919,17 +1919,108 @@ textarea {
 
 .route-primary-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 
 .btn-action-compact {
   flex: 1;
   min-width: 0;
-  padding: 0 12px;
-  font-size: 0.8rem;
+  padding: 0 10px;
+  font-size: 0.79rem;
   height: 36px;
-  gap: 6px;
+  gap: 5px;
   white-space: nowrap;
+}
+
+.btn-outline.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.save-route-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.save-route-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.73rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.save-route-close-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.save-route-close-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.save-route-input {
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--field);
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.save-route-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.save-route-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.save-route-btn {
+  height: 30px;
+  font-size: 0.75rem;
+}
+
+.status-inline-link {
+  appearance: none;
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 2px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+:root[data-theme="dark"] .status-inline-link {
+  color: #60a5fa;
+}
+
+.status-inline-link:hover {
+  text-decoration: underline;
 }
 
 /* Status Bar */
@@ -5142,6 +5233,107 @@ button.rl-stop-pill.is-clickable:hover {
 .rl-btn-gpx {
   flex: 0 0 auto;
   padding: 0 9px;
+}
+
+.rl-tabs-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rl-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 0.66rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.pe-mode-tab.active .rl-tab-badge {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+:root[data-theme="dark"] .pe-mode-tab.active .rl-tab-badge {
+  background: rgba(96, 165, 250, 0.25);
+  color: #eff6ff;
+}
+
+.rl-backup-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.rl-saved-meta-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.rl-inline-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.71rem;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+}
+
+:root[data-theme="dark"] .rl-inline-btn {
+  color: #60a5fa;
+}
+
+.rl-inline-btn.is-danger {
+  color: var(--danger);
+}
+
+.rl-inline-btn:hover {
+  text-decoration: underline;
+}
+
+.rl-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.rl-edit-input {
+  width: 100%;
+  height: 29px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.76rem;
+}
+
+.rl-edit-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.rl-edit-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.rl-edit-btn {
+  height: 28px;
+  font-size: 0.74rem;
 }
 
 .library-rank-marker {

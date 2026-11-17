@@ -12,6 +12,11 @@ import {
   type ProfileName,
 } from '../types.ts';
 import { routeToGpx, downloadGpxFile } from '../utils/gpx.ts';
+import {
+  isLoopCoordinates,
+  suggestSavedRouteName,
+  type SavedRouteRecord,
+} from '../utils/saved-routes.ts';
 import { getShareableRouteUrl, isNativePlatform } from '../platform.ts';
 import { Header } from './Header.tsx';
 import { WaypointList } from './WaypointList.tsx';
@@ -28,6 +33,13 @@ interface ControlsPanelProps {
   onToggleProfileEditor: () => void;
   isRouteLibraryOpen: boolean;
   onToggleRouteLibrary: () => void;
+  onOpenSavedLibrary?: () => void;
+  activeSavedRoute?: SavedRouteRecord | null;
+  onSaveCurrentRoute?: (params: {
+    name: string;
+    notes?: string;
+    mode: 'create' | 'update';
+  }) => boolean;
   routeLibraryNode?: React.ReactNode;
   onOpenSettings: () => void;
   onOpenAbout: () => void;
@@ -46,6 +58,9 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   onToggleProfileEditor,
   isRouteLibraryOpen,
   onToggleRouteLibrary,
+  onOpenSavedLibrary,
+  activeSavedRoute,
+  onSaveCurrentRoute,
   routeLibraryNode,
   onOpenSettings,
   onOpenAbout,
@@ -57,8 +72,26 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const routeSectionRef = useRef<HTMLDivElement | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const saveNameInputRef = useRef<HTMLInputElement | null>(null);
   const [shareCopied, setShareCopied] = useState(false);
   const [openColorSlotIdx, setOpenColorSlotIdx] = useState<number | null>(null);
+  const [isSaveFormOpen, setIsSaveFormOpen] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [saveNotes, setSaveNotes] = useState('');
+  const [saveCopied, setSaveCopied] = useState(false);
+
+  useEffect(() => {
+    if (!routing.currentRoute && isSaveFormOpen) {
+      setIsSaveFormOpen(false);
+    }
+  }, [routing.currentRoute, isSaveFormOpen]);
+
+  useEffect(() => {
+    if (isSaveFormOpen && saveNameInputRef.current) {
+      saveNameInputRef.current.focus();
+      saveNameInputRef.current.select();
+    }
+  }, [isSaveFormOpen]);
 
   useEffect(() => {
     if (openColorSlotIdx === null) return;
@@ -163,6 +196,45 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
     const filename = `${trackName.replace(/[/\\?%*:|"<>]/g, '_')}.gpx`;
     await downloadGpxFile(routeToGpx(routing.currentRoute, trackName), filename);
     routing.setStatus(`Route exported as ${filename}`);
+  };
+
+  const handleToggleSaveForm = () => {
+    if (!routing.currentRoute || routing.waypoints.length < 2) return;
+    if (isSaveFormOpen) {
+      setIsSaveFormOpen(false);
+      return;
+    }
+    if (activeSavedRoute) {
+      setSaveName(activeSavedRoute.name);
+      setSaveNotes(activeSavedRoute.notes || '');
+    } else {
+      const feat = routing.currentRoute.features?.[0];
+      const coords = (feat?.geometry as GeoJSON.LineString | undefined)?.coordinates || [];
+      const distM = Number((feat?.properties as Record<string, unknown> | undefined)?.['track-length']) || 0;
+      const loop = isLoopCoordinates(coords, distM);
+      setSaveName(
+        suggestSavedRouteName(
+          routing.waypoints,
+          loop,
+          routing.getProfileMeta(routing.profile).shortLabel,
+        ),
+      );
+      setSaveNotes('');
+    }
+    setIsSaveFormOpen(true);
+  };
+
+  const handleSubmitSave = (mode: 'create' | 'update') => {
+    if (!onSaveCurrentRoute) return;
+    const ok = onSaveCurrentRoute({
+      name: saveName,
+      notes: saveNotes,
+      mode,
+    });
+    if (!ok) return;
+    setIsSaveFormOpen(false);
+    setSaveCopied(true);
+    setTimeout(() => setSaveCopied(false), 2400);
   };
 
   const isBusy = routing.isRouting || offline.downloadProgress.active;
@@ -606,6 +678,83 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
         </div>
 
         <div className="route-section-footer">
+          {isSaveFormOpen && routing.currentRoute && (
+            <form
+              id="save-route-form"
+              className="save-route-popover"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSubmitSave(activeSavedRoute ? 'update' : 'create');
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setIsSaveFormOpen(false);
+                }
+              }}
+            >
+              <div className="save-route-popover-header">
+                <span>{activeSavedRoute ? 'Update saved route' : 'Save route locally'}</span>
+                <button
+                  type="button"
+                  className="save-route-close-btn"
+                  aria-label="Close save form"
+                  onClick={() => setIsSaveFormOpen(false)}
+                >
+                  <Icon name="close" size={12} />
+                </button>
+              </div>
+              <input
+                ref={saveNameInputRef}
+                id="input-save-route-name"
+                type="text"
+                className="save-route-input"
+                value={saveName}
+                placeholder="Route name"
+                aria-label="Route name"
+                onChange={(e) => setSaveName(e.target.value)}
+              />
+              <input
+                id="input-save-route-notes"
+                type="text"
+                className="save-route-input"
+                value={saveNotes}
+                placeholder="Optional note"
+                aria-label="Optional route note"
+                onChange={(e) => setSaveNotes(e.target.value)}
+              />
+              <div className="save-route-actions">
+                {activeSavedRoute ? (
+                  <>
+                    <button
+                      id="btn-confirm-update-route"
+                      type="submit"
+                      className="btn btn-primary btn-action-compact save-route-btn"
+                    >
+                      <span>Update</span>
+                    </button>
+                    <button
+                      id="btn-confirm-save-new-route"
+                      type="button"
+                      className="btn btn-outline btn-action-compact save-route-btn"
+                      onClick={() => handleSubmitSave('create')}
+                    >
+                      <span>Save as new</span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    id="btn-confirm-save-route"
+                    type="submit"
+                    className="btn btn-primary btn-action-compact save-route-btn"
+                  >
+                    <span>Save route</span>
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
+
           <div
             id="status"
             className={`status-bar ${isBusy ? 'is-busy' : ''} ${routing.isError ? 'is-error' : ''}`}
@@ -614,9 +763,37 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           >
             {isBusy && <span className="status-spinner" aria-hidden="true" />}
             {routing.status && <span className="status-text">{routing.status}</span>}
+            {saveCopied && onOpenSavedLibrary && !isBusy && !routing.isError && (
+              <button
+                id="btn-status-view-saved"
+                type="button"
+                className="status-inline-link"
+                onClick={onOpenSavedLibrary}
+              >
+                View saved
+              </button>
+            )}
           </div>
 
           <div className="route-primary-actions">
+            {onSaveCurrentRoute && (
+              <button
+                id="btn-save-route"
+                type="button"
+                className={`btn btn-outline btn-action-compact ${isSaveFormOpen ? 'active' : ''}`}
+                title={
+                  activeSavedRoute
+                    ? `Update or save a copy of "${activeSavedRoute.name}"`
+                    : 'Save route to your local library'
+                }
+                disabled={!routing.currentRoute || routing.waypoints.length < 2}
+                onClick={handleToggleSaveForm}
+              >
+                <Icon name={saveCopied ? 'check' : 'save'} size={13} />
+                <span>{saveCopied ? 'Saved' : 'Save'}</span>
+              </button>
+            )}
+
             <button
               id="btn-share"
               type="button"

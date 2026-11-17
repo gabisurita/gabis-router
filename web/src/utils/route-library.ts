@@ -39,6 +39,7 @@ export interface LibraryRoute {
   url?: string;
   desc?: string;
   stops?: LibraryStop[];
+  updatedAt?: number;
 }
 
 export interface LibraryIndex {
@@ -102,7 +103,7 @@ export interface MapBoundsBox {
 
 export type DistanceBucket = 'all' | 'short' | 'medium' | 'long' | 'ultra';
 export type ShapeFilter = 'all' | 'loop' | 'p2p';
-export type LibrarySort = 'nearby' | 'shortest' | 'longest' | 'climbing';
+export type LibrarySort = 'recent' | 'nearby' | 'shortest' | 'longest' | 'climbing';
 
 export interface LibraryFilterState {
   query: string;
@@ -323,7 +324,9 @@ export function filterAndSortLibraryRoutes(
     return true;
   });
 
-  if (filters.sort === 'shortest') {
+  if (filters.sort === 'recent') {
+    matched.sort((a, b) => (b.updatedAt ?? b.id) - (a.updatedAt ?? a.id));
+  } else if (filters.sort === 'shortest') {
     matched.sort((a, b) => a.km - b.km);
   } else if (filters.sort === 'longest') {
     matched.sort((a, b) => b.km - a.km);

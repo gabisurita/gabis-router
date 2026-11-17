@@ -4,6 +4,7 @@ import type { SegmentHighlight } from './utils/classification.ts';
 import { MAX_ROUTES } from './types.ts';
 import type { SuggestionDimLevel } from './utils/map-layers.ts';
 import {
+  decodePolyline5,
   fetchLibraryIndex,
   filterAndSortLibraryRoutes,
   HOVER_FALLBACK_COLOR,
@@ -15,14 +16,27 @@ import {
   type LibraryFilterState,
   type LibraryIndex,
   type LibraryRoute,
+  type LibrarySource,
   type MapBoundsBox,
   type PreviewLibraryRoute,
   type SuggestedLibraryTrack,
 } from './utils/route-library.ts';
+import {
+  buildSavedRouteRecord,
+  downloadJsonFile,
+  loadSavedRoutesFromStorage,
+  mergeImportedSavedRoutes,
+  nextSavedRouteId,
+  parseSavedRoutesBackup,
+  savedRouteToLibraryRoute,
+  saveRoutesToStorage,
+  serializeSavedRoutesBackup,
+  type SavedRouteRecord,
+} from './utils/saved-routes.ts';
 import { PopoverProvider } from './components/TooltipPopover.tsx';
 import { MapView } from './components/MapView.tsx';
 import { ControlsPanel } from './components/ControlsPanel.tsx';
-import { RouteLibraryPanel } from './components/RouteLibraryPanel.tsx';
+import { RouteLibraryPanel, type RouteLibraryTab } from './components/RouteLibraryPanel.tsx';
 import { RouteInfoDrawer } from './components/RouteInfoDrawer.tsx';
 import { SettingsSection } from './components/SettingsSection.tsx';
 import { AboutModal } from './components/AboutModal.tsx';
@@ -30,6 +44,12 @@ import { useRouting } from './hooks/useRouting.ts';
 import { useOffline } from './hooks/useOffline.ts';
 import { useSettings } from './hooks/useSettings.ts';
 import { useMcpBridge } from './mcp-bridge.ts';
+
+function isMobileViewport(): boolean {
+  if (typeof window === 'undefined') return false;
+  const rootW = typeof document !== 'undefined' ? document.getElementById('root')?.clientWidth : 0;
+  return (rootW || window.innerWidth) <= 860;
+}
 
 export const App: React.FC = () => {
   const mapInstanceRef = useRef<maplibregl.Map | null>(null);
@@ -55,11 +75,15 @@ export const App: React.FC = () => {
   const [segmentHighlight, setSegmentHighlight] = useState<SegmentHighlight | null>(null);
   const [editingWaypointIndex, setEditingWaypointIndex] = useState<number | null>(null);
 
-  // Route Library state (lazy-loaded on first open)
+  // Route Library & Saved Routes state
+  const [libraryTab, setLibraryTab] = useState<RouteLibraryTab>('curated');
+  const [savedRoutes, setSavedRoutes] = useState<SavedRouteRecord[]>(() =>
+    loadSavedRoutesFromStorage(),
+  );
   const [libraryIndex, setLibraryIndex] = useState<LibraryIndex | null>(null);
   const [isLoadingLibrary, setIsLoadingLibrary] = useState<boolean>(false);
   const [libraryError, setLibraryError] = useState<string | null>(null);
-  const [libraryFilters, setLibraryFilters] = useState<LibraryFilterState>({
+  const [curatedFilters, setCuratedFilters] = useState<LibraryFilterState>({
     query: '',
     inMapView: true,
     surface: 'all',
@@ -68,6 +92,16 @@ export const App: React.FC = () => {
     source: 'all',
     sort: 'nearby',
   });
+  const [savedFilters, setSavedFilters] = useState<LibraryFilterState>({
+    query: '',
+    inMapView: false,
+    surface: 'all',
+    distance: 'all',
+    shape: 'all',
+    source: 'all',
+    sort: 'recent',
+  });
+  const libraryFilters = libraryTab === 'saved' ? savedFilters : curatedFilters;
   const [selectedLibraryRouteId, setSelectedLibraryRouteId] = useState<number | null>(null);
   const [hoveredLibraryRoute, setHoveredLibraryRoute] = useState<LibraryRoute | null>(null);
   const [suggestedLibraryTracks, setSuggestedLibraryTracks] = useState<SuggestedLibraryTrack[]>([]);
@@ -84,7 +118,7 @@ export const App: React.FC = () => {
   const previewReqSeqRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!isRouteLibraryOpen || libraryIndex || isLoadingLibrary) return;
+    if (!isRouteLibraryOpen || libraryTab !== 'curated' || libraryIndex || isLoadingLibrary) return;
     setIsLoadingLibrary(true);
     setLibraryError(null);
     fetchLibraryIndex()
@@ -97,33 +131,104 @@ export const App: React.FC = () => {
       .finally(() => {
         setIsLoadingLibrary(false);
       });
-  }, [isRouteLibraryOpen, libraryIndex, isLoadingLibrary]);
+  }, [isRouteLibraryOpen, libraryTab, libraryIndex, isLoadingLibrary]);
+
+  const savedRoutesById = useMemo(
+    () => new Map<number, SavedRouteRecord>(savedRoutes.map((r) => [r.id, r])),
+    [savedRoutes],
+  );
+
+  const activeSavedRoute = useMemo(
+    () =>
+      routing.activeSavedRouteId !== null
+        ? savedRoutesById.get(routing.activeSavedRouteId) ?? null
+        : null,
+    [routing.activeSavedRouteId, savedRoutesById],
+  );
+
+  const savedSources = useMemo<LibrarySource[]>(() => {
+    const counts = new Map<string, number>();
+    for (const r of savedRoutes) {
+      counts.set(r.profile, (counts.get(r.profile) || 0) + 1);
+    }
+    return Array.from(counts.entries()).map(([profId, count]) => ({
+      slug: profId,
+      name: routing.getProfileMeta(profId).shortLabel,
+      category: 'saved',
+      region: '',
+      url: '',
+      license: '',
+      count,
+    }));
+  }, [savedRoutes, routing.getProfileMeta]);
+
+  const savedLibraryRoutes = useMemo(
+    () => savedRoutes.map((r) => savedRouteToLibraryRoute(r, r.profile)),
+    [savedRoutes],
+  );
+
+  const activeSources = useMemo(
+    () => (libraryTab === 'saved' ? savedSources : libraryIndex?.sources || []),
+    [libraryTab, savedSources, libraryIndex],
+  );
 
   const sourceNamesBySlug = useMemo(() => {
     const m = new Map<string, string>();
-    for (const s of libraryIndex?.sources || []) m.set(s.slug, s.name);
+    for (const s of activeSources) m.set(s.slug, s.name);
     return m;
-  }, [libraryIndex]);
+  }, [activeSources]);
 
   const isRouteLibraryOpenRef = useRef<boolean>(isRouteLibraryOpen);
   isRouteLibraryOpenRef.current = isRouteLibraryOpen;
 
+  const activeBaseRoutes = useMemo(
+    () => (libraryTab === 'saved' ? savedLibraryRoutes : libraryIndex?.routes || []),
+    [libraryTab, savedLibraryRoutes, libraryIndex],
+  );
+
   const filteredLibraryRoutes = useMemo(() => {
-    if (!isRouteLibraryOpen || !libraryIndex) return [];
+    if (!isRouteLibraryOpen) return [];
+    if (libraryTab === 'curated' && !libraryIndex) return [];
     return filterAndSortLibraryRoutes(
-      libraryIndex.routes,
+      activeBaseRoutes,
       sourceNamesBySlug,
       libraryFilters,
       mapBounds,
       mapCenter,
     );
-  }, [isRouteLibraryOpen, libraryIndex, sourceNamesBySlug, libraryFilters, mapBounds, mapCenter]);
+  }, [
+    isRouteLibraryOpen,
+    libraryTab,
+    libraryIndex,
+    activeBaseRoutes,
+    sourceNamesBySlug,
+    libraryFilters,
+    mapBounds,
+    mapCenter,
+  ]);
+
+  const resolveRouteCoordinates = useCallback(
+    async (route: LibraryRoute): Promise<[number, number][]> => {
+      const saved = savedRoutesById.get(route.id);
+      if (saved) {
+        return decodePolyline5(saved.polyline5);
+      }
+      return loadLibraryRouteCoordinates(route);
+    },
+    [savedRoutesById],
+  );
 
   const topFiveRoutes = useMemo(
     () => (isRouteLibraryOpen ? filteredLibraryRoutes.slice(0, TOP_SUGGESTION_COUNT) : []),
     [isRouteLibraryOpen, filteredLibraryRoutes],
   );
-  const topFiveKey = useMemo(() => topFiveRoutes.map((r) => r.id).join(','), [topFiveRoutes]);
+  const topFiveKey = useMemo(
+    () =>
+      topFiveRoutes
+        .map((r) => `${r.id}:${r.updatedAt ?? 0}`)
+        .join(','),
+    [topFiveRoutes],
+  );
 
   // Dynamically load the Top 5 suggested tracks for the current map view / filter state
   useEffect(() => {
@@ -134,7 +239,7 @@ export const App: React.FC = () => {
     let cancelled = false;
     Promise.all(
       topFiveRoutes.map(async (route, idx) => {
-        const coordinates = await loadLibraryRouteCoordinates(route);
+        const coordinates = await resolveRouteCoordinates(route);
         return {
           rank: idx + 1,
           route,
@@ -154,14 +259,14 @@ export const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [isRouteLibraryOpen, topFiveKey]);
+  }, [isRouteLibraryOpen, topFiveKey, resolveRouteCoordinates]);
 
   const selectedLibraryRoute = useMemo(
     () =>
       selectedLibraryRouteId !== null
-        ? libraryIndex?.routes.find((r) => r.id === selectedLibraryRouteId) || null
+        ? activeBaseRoutes.find((r) => r.id === selectedLibraryRouteId) || null
         : null,
-    [libraryIndex, selectedLibraryRouteId],
+    [activeBaseRoutes, selectedLibraryRouteId],
   );
 
   const focusedLibraryRoute = hoveredLibraryRoute ?? selectedLibraryRoute;
@@ -175,7 +280,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    const source = libraryIndex?.sources.find((s) => s.slug === focusedLibraryRoute.src);
+    const source = activeSources.find((s) => s.slug === focusedLibraryRoute.src);
     const existingSuggestion = suggestedLibraryTracks.find(
       (t) => t.route.id === focusedLibraryRoute.id,
     );
@@ -193,6 +298,18 @@ export const App: React.FC = () => {
     const rankIdx = topFiveRoutes.findIndex((r) => r.id === focusedLibraryRoute.id);
     const color =
       rankIdx >= 0 ? SUGGESTION_COLORS[rankIdx % SUGGESTION_COLORS.length] : HOVER_FALLBACK_COLOR;
+
+    const saved = savedRoutesById.get(focusedLibraryRoute.id);
+    if (saved) {
+      setActiveLibraryPreview({
+        route: focusedLibraryRoute,
+        source,
+        coordinates: decodePolyline5(saved.polyline5),
+        color,
+      });
+      setIsPreviewLoading(false);
+      return;
+    }
 
     setIsPreviewLoading(focusedLibraryRoute.id === selectedLibraryRouteId);
     loadLibraryRouteCoordinates(focusedLibraryRoute)
@@ -214,7 +331,8 @@ export const App: React.FC = () => {
     focusedLibraryRoute,
     suggestedLibraryTracks,
     topFiveRoutes,
-    libraryIndex,
+    activeSources,
+    savedRoutesById,
     selectedLibraryRouteId,
   ]);
 
@@ -228,6 +346,23 @@ export const App: React.FC = () => {
     }
     return 'none';
   }, [hoveredLibraryRoute, selectedLibraryRoute, mapBounds]);
+
+  const handleChangeLibraryTab = useCallback((nextTab: RouteLibraryTab) => {
+    setLibraryTab(nextTab);
+    setSelectedLibraryRouteId(null);
+    setHoveredLibraryRoute(null);
+  }, []);
+
+  const handleChangeLibraryFilters = useCallback(
+    (patch: Partial<LibraryFilterState>) => {
+      if (libraryTab === 'saved') {
+        setSavedFilters((prev) => ({ ...prev, ...patch }));
+      } else {
+        setCuratedFilters((prev) => ({ ...prev, ...patch }));
+      }
+    },
+    [libraryTab],
+  );
 
   const handleSelectLibraryRoute = useCallback((route: LibraryRoute | null) => {
     if (!route) {
@@ -249,11 +384,11 @@ export const App: React.FC = () => {
         setFrameLibraryPreviewSeq((s) => s + 1);
         return;
       }
-      const source = libraryIndex?.sources.find((s) => s.slug === route.src);
+      const source = activeSources.find((s) => s.slug === route.src);
       const rankIdx = topFiveRoutes.findIndex((r) => r.id === route.id);
       const color =
         rankIdx >= 0 ? SUGGESTION_COLORS[rankIdx % SUGGESTION_COLORS.length] : HOVER_FALLBACK_COLOR;
-      loadLibraryRouteCoordinates(route)
+      resolveRouteCoordinates(route)
         .then((coordinates) => {
           setActiveLibraryPreview({ route, source, coordinates, color });
           setFrameLibraryPreviewSeq((s) => s + 1);
@@ -262,11 +397,22 @@ export const App: React.FC = () => {
           routing.setStatus(`Could not load route preview: ${err?.message || String(err)}`, true);
         });
     },
-    [activeLibraryPreview, libraryIndex, topFiveRoutes, routing],
+    [activeLibraryPreview, activeSources, topFiveRoutes, resolveRouteCoordinates, routing],
   );
 
   const handleLoadLibraryRouteIntoPlanner = useCallback(
     async (route: LibraryRoute, mode: 'current' | 'new-route') => {
+      const saved = savedRoutesById.get(route.id);
+      if (saved) {
+        setHoveredLibraryRoute(null);
+        setIsRouteLibraryOpen(false);
+        if (isMobileViewport()) {
+          setIsControlsCollapsed(true);
+        }
+        routing.loadSavedRoute(saved, mode);
+        return;
+      }
+
       const coords =
         activeLibraryPreview?.route.id === route.id
           ? activeLibraryPreview.coordinates
@@ -278,13 +424,207 @@ export const App: React.FC = () => {
       }
       setHoveredLibraryRoute(null);
       setIsRouteLibraryOpen(false);
-      if (window.innerWidth <= 860) {
+      if (isMobileViewport()) {
         setIsControlsCollapsed(true);
       }
       routing.importGpxContent(gpx, 25);
     },
-    [activeLibraryPreview, sourceNamesBySlug, routing],
+    [savedRoutesById, activeLibraryPreview, sourceNamesBySlug, routing],
   );
+
+  const handleSaveCurrentRoute = useCallback(
+    ({
+      name,
+      notes,
+      mode,
+    }: {
+      name: string;
+      notes?: string;
+      mode: 'create' | 'update';
+    }): boolean => {
+      if (!routing.currentRoute || routing.waypoints.length < 2) return false;
+
+      let targetProfile = routing.profile;
+      let customProfileSnap =
+        routing.customProfiles.find((c) => c.id === routing.profile) ||
+        (routing.draftProfile?.id === routing.profile ? routing.draftProfile : undefined);
+
+      if (targetProfile === 'custom:__draft__' && customProfileSnap) {
+        const slug = (customProfileSnap.name || 'custom-profile')
+          .toLowerCase()
+          .trim()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        const promotedId = `custom:${slug || 'saved-profile'}`;
+        const promoted = {
+          ...customProfileSnap,
+          id: promotedId,
+          updatedAt: Date.now(),
+        };
+        routing.saveCustomProfile(promoted, false);
+        routing.setSlotProfile(routing.activeSlotIdx, promotedId, false);
+        targetProfile = promotedId;
+        customProfileSnap = promoted;
+      }
+
+      const isUpdate = mode === 'update' && activeSavedRoute !== null;
+      const targetId = isUpdate ? activeSavedRoute.id : nextSavedRouteId(savedRoutes);
+
+      try {
+        const record = buildSavedRouteRecord({
+          id: targetId,
+          createdAt: isUpdate ? activeSavedRoute.createdAt : undefined,
+          name,
+          notes,
+          profile: targetProfile,
+          profileLabel: routing.getProfileMeta(targetProfile).shortLabel,
+          customProfile: customProfileSnap,
+          waypoints: routing.waypoints,
+          avoidAreas: routing.avoidAreas,
+          alternativeIdx: routing.alternativeIdx,
+          route: routing.currentRoute,
+        });
+
+        const nextList = isUpdate
+          ? savedRoutes.map((r) => (r.id === record.id ? record : r))
+          : [record, ...savedRoutes];
+        nextList.sort((a, b) => b.updatedAt - a.updatedAt);
+
+        saveRoutesToStorage(nextList);
+        setSavedRoutes(nextList);
+        routing.setActiveSavedRouteId(record.id);
+        routing.setStatus(
+          isUpdate ? `Updated "${record.name}".` : `Saved "${record.name}".`,
+        );
+        return true;
+      } catch (err: any) {
+        routing.setStatus(
+          `Could not save route: ${err?.message || String(err)}`,
+          true,
+        );
+        return false;
+      }
+    },
+    [routing, activeSavedRoute, savedRoutes],
+  );
+
+  const handleRenameSavedRoute = useCallback(
+    (id: number, name: string, notes?: string) => {
+      const nextList = savedRoutes
+        .map((r) =>
+          r.id === id ? { ...r, name: name.trim() || r.name, notes, updatedAt: Date.now() } : r,
+        )
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      try {
+        saveRoutesToStorage(nextList);
+        setSavedRoutes(nextList);
+        routing.setStatus(`Updated "${name.trim()}".`);
+      } catch (err: any) {
+        routing.setStatus(`Could not update route: ${err?.message || String(err)}`, true);
+      }
+    },
+    [savedRoutes, routing],
+  );
+
+  const handleDeleteSavedRoute = useCallback(
+    (id: number) => {
+      const target = savedRoutesById.get(id);
+      const nextList = savedRoutes.filter((r) => r.id !== id);
+      try {
+        saveRoutesToStorage(nextList);
+        setSavedRoutes(nextList);
+        routing.clearDeletedSavedRouteId(id);
+        if (selectedLibraryRouteId === id) setSelectedLibraryRouteId(null);
+        if (hoveredLibraryRoute?.id === id) setHoveredLibraryRoute(null);
+        if (target) {
+          routing.setStatus(`Deleted "${target.name}".`);
+        }
+      } catch (err: any) {
+        routing.setStatus(`Could not delete route: ${err?.message || String(err)}`, true);
+      }
+    },
+    [savedRoutes, savedRoutesById, selectedLibraryRouteId, hoveredLibraryRoute, routing],
+  );
+
+  const handleExportSavedJson = useCallback(async () => {
+    if (savedRoutes.length === 0) return;
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `rsrouter-saved-routes-${dateStr}.json`;
+    const json = serializeSavedRoutesBackup(savedRoutes);
+    await downloadJsonFile(json, filename);
+    routing.setStatus(`Exported ${savedRoutes.length} saved route${savedRoutes.length === 1 ? '' : 's'} as ${filename}.`);
+  }, [savedRoutes, routing]);
+
+  const importSavedJsonText = useCallback(
+    (text: string) => {
+      try {
+        const incoming = parseSavedRoutesBackup(text);
+        const { merged, addedCount, updatedCount } = mergeImportedSavedRoutes(
+          savedRoutes,
+          incoming,
+        );
+        saveRoutesToStorage(merged);
+
+        for (const rec of incoming) {
+          if (
+            rec.customProfile &&
+            !routing.customProfiles.some((c) => c.id === rec.customProfile!.id)
+          ) {
+            routing.saveCustomProfile(rec.customProfile, false);
+          }
+        }
+
+        setSavedRoutes(merged);
+        if (addedCount === 0 && updatedCount === 0) {
+          routing.setStatus('All routes in backup are already saved.');
+        } else {
+          const parts: string[] = [];
+          if (addedCount > 0) parts.push(`${addedCount} added`);
+          if (updatedCount > 0) parts.push(`${updatedCount} updated`);
+          routing.setStatus(`Imported backup: ${parts.join(', ')}.`);
+        }
+      } catch (err: any) {
+        routing.setStatus(err?.message || String(err), true);
+      }
+    },
+    [savedRoutes, routing],
+  );
+
+  const handleImportSavedJsonFile = useCallback(
+    async (file: File) => {
+      try {
+        const text = await file.text();
+        importSavedJsonText(text);
+      } catch (err: any) {
+        routing.setStatus(err?.message || String(err), true);
+      }
+    },
+    [importSavedJsonText, routing],
+  );
+
+  const handleOpenSavedLibrary = useCallback(() => {
+    setIsProfileEditorOpen(false);
+    if (isMobileViewport()) {
+      setIsRouteInfoCollapsed(true);
+    }
+    const map = mapInstanceRef.current;
+    if (map) {
+      const b = map.getBounds();
+      const c = map.getCenter();
+      setMapBounds({
+        west: b.getWest(),
+        south: b.getSouth(),
+        east: b.getEast(),
+        north: b.getNorth(),
+      });
+      setMapCenter({ lat: c.lat, lon: c.lng });
+    }
+    setLibraryTab('saved');
+    setSelectedLibraryRouteId(null);
+    setHoveredLibraryRoute(null);
+    setIsRouteLibraryOpen(true);
+    setIsControlsCollapsed(false);
+  }, []);
 
   const handleMapViewportChange = useCallback(
     (bounds: MapBoundsBox, center: { lat: number; lon: number }) => {
@@ -303,7 +643,7 @@ export const App: React.FC = () => {
     const hasRoute = !!routing.currentRoute;
     if (hasRoute && !hadRouteRef.current) {
       setIsRouteInfoCollapsed(false);
-      if (window.innerWidth <= 860) {
+      if (isMobileViewport()) {
         setIsControlsCollapsed(true);
       }
     }
@@ -374,6 +714,12 @@ export const App: React.FC = () => {
       setIsControlsCollapsed,
       isProfileEditorOpen,
       setIsProfileEditorOpen,
+      isRouteLibraryOpen,
+      setIsRouteLibraryOpen,
+      libraryTab,
+      setLibraryTab,
+      savedRoutes,
+      importSavedJsonText,
       isRouteInfoCollapsed,
       setIsRouteInfoCollapsed,
       isSettingsOpen,
@@ -396,7 +742,7 @@ export const App: React.FC = () => {
         onToggleCollapse={() => {
           setIsControlsCollapsed((prev) => {
             const next = !prev;
-            if (!next && window.innerWidth <= 860) {
+            if (!next && isMobileViewport()) {
               setIsRouteInfoCollapsed(true);
             }
             return next;
@@ -420,7 +766,7 @@ export const App: React.FC = () => {
             const next = !prev;
             if (next) {
               setIsProfileEditorOpen(false);
-              if (window.innerWidth <= 860) {
+              if (isMobileViewport()) {
                 setIsRouteInfoCollapsed(true);
               }
               const map = mapInstanceRef.current;
@@ -442,17 +788,26 @@ export const App: React.FC = () => {
           });
           setIsControlsCollapsed(false);
         }}
+        onOpenSavedLibrary={handleOpenSavedLibrary}
+        activeSavedRoute={activeSavedRoute}
+        onSaveCurrentRoute={handleSaveCurrentRoute}
         routeLibraryNode={
           <RouteLibraryPanel
+            activeTab={libraryTab}
+            onChangeTab={handleChangeLibraryTab}
+            savedTotalCount={savedRoutes.length}
+            savedRoutesById={savedRoutesById}
+            onRenameSavedRoute={handleRenameSavedRoute}
+            onDeleteSavedRoute={handleDeleteSavedRoute}
+            onExportSavedJson={handleExportSavedJson}
+            onImportSavedJsonFile={handleImportSavedJsonFile}
             isLoadingIndex={isLoadingLibrary}
             indexError={libraryError}
-            sources={libraryIndex?.sources || []}
+            sources={activeSources}
             totalCount={libraryIndex?.routes.length || 0}
             filteredRoutes={filteredLibraryRoutes}
             filters={libraryFilters}
-            onChangeFilters={(patch) =>
-              setLibraryFilters((prev) => ({ ...prev, ...patch }))
-            }
+            onChangeFilters={handleChangeLibraryFilters}
             selectedRouteId={selectedLibraryRouteId}
             hoveredRouteId={hoveredLibraryRoute?.id ?? null}
             isPreviewLoading={isPreviewLoading}
@@ -492,7 +847,7 @@ export const App: React.FC = () => {
         onToggleCollapse={() => {
           setIsRouteInfoCollapsed((prev) => {
             const next = !prev;
-            if (!next && window.innerWidth <= 860) {
+            if (!next && isMobileViewport()) {
               setIsControlsCollapsed(true);
             }
             return next;

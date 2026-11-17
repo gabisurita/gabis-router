@@ -14,9 +14,20 @@ import {
   type LibrarySource,
   type LibrarySurface,
 } from '../utils/route-library.ts';
+import { savedRouteToGpx, type SavedRouteRecord } from '../utils/saved-routes.ts';
 import { Icon } from './common/Icon.tsx';
 
+export type RouteLibraryTab = 'curated' | 'saved';
+
 interface RouteLibraryPanelProps {
+  activeTab?: RouteLibraryTab;
+  onChangeTab?: (tab: RouteLibraryTab) => void;
+  savedTotalCount?: number;
+  savedRoutesById?: ReadonlyMap<number, SavedRouteRecord>;
+  onRenameSavedRoute?: (id: number, name: string, notes?: string) => void;
+  onDeleteSavedRoute?: (id: number) => void;
+  onExportSavedJson?: () => void;
+  onImportSavedJsonFile?: (file: File) => void;
   isLoadingIndex: boolean;
   indexError: string | null;
   sources: LibrarySource[];
@@ -59,7 +70,24 @@ const STOP_KIND_LABELS: Record<string, string> = {
   transit: 'Station',
 };
 
+function formatShortDate(epochMs?: number): string {
+  if (!epochMs || !Number.isFinite(epochMs)) return '';
+  return new Date(epochMs).toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
 export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
+  activeTab = 'curated',
+  onChangeTab,
+  savedTotalCount = 0,
+  savedRoutesById,
+  onRenameSavedRoute,
+  onDeleteSavedRoute,
+  onExportSavedJson,
+  onImportSavedJsonFile,
   isLoadingIndex,
   indexError,
   sources,
@@ -83,8 +111,16 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
 }) => {
   const [visibleLimit, setVisibleLimit] = useState(PAGE_STEP);
   const [busyRouteAction, setBusyRouteAction] = useState<string | null>(null);
+  const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
+  const [editName, setEditName] = useState<string>('');
+  const [editNotes, setEditNotes] = useState<string>('');
   const listRef = useRef<HTMLDivElement | null>(null);
   const selectedCardRef = useRef<HTMLDivElement | null>(null);
+  const importBackupInputRef = useRef<HTMLInputElement | null>(null);
+  const editNameInputRef = useRef<HTMLInputElement | null>(null);
+
+  const isSavedTab = activeTab === 'saved';
+  const activeTotalCount = isSavedTab ? savedTotalCount : totalCount;
 
   const sourceMap = React.useMemo(() => {
     const m = new Map<string, LibrarySource>();
@@ -98,6 +134,7 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
       listRef.current.scrollTop = 0;
     }
   }, [
+    activeTab,
     filters.query,
     filters.inMapView,
     filters.surface,
@@ -106,6 +143,17 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
     filters.source,
     filters.sort,
   ]);
+
+  useEffect(() => {
+    setEditingRouteId(null);
+  }, [activeTab, selectedRouteId]);
+
+  useEffect(() => {
+    if (editingRouteId !== null && editNameInputRef.current) {
+      editNameInputRef.current.focus();
+      editNameInputRef.current.select();
+    }
+  }, [editingRouteId]);
 
   // Ensure a route clicked directly on the map is within visibleLimit and scrolled into view.
   useEffect(() => {
@@ -117,7 +165,7 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
     requestAnimationFrame(() => {
       selectedCardRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
-  }, [selectedRouteId, filteredRoutes]);
+  }, [selectedRouteId, filteredRoutes, visibleLimit]);
 
   const hasActiveFilters =
     filters.query.trim().length > 0 ||
@@ -156,14 +204,44 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
     const key = `${route.id}:gpx`;
     setBusyRouteAction(key);
     try {
-      const coords = await loadLibraryRouteCoordinates(route);
-      const srcName = sourceMap.get(route.src)?.name;
-      const gpx = libraryTrackToGpx(route, coords, srcName);
+      let gpx: string;
+      if (isSavedTab) {
+        const savedRec = savedRoutesById?.get(route.id);
+        if (!savedRec) return;
+        gpx = savedRouteToGpx(savedRec);
+      } else {
+        const coords = await loadLibraryRouteCoordinates(route);
+        const srcName = sourceMap.get(route.src)?.name;
+        gpx = libraryTrackToGpx(route, coords, srcName);
+      }
       const safeName = route.name.replace(/[/\\?%*:|"<>]/g, '_');
       await downloadGpxFile(gpx, `${safeName}.gpx`);
     } finally {
       setBusyRouteAction(null);
     }
+  };
+
+  const handleImportInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && onImportSavedJsonFile) {
+      onImportSavedJsonFile(file);
+    }
+    e.target.value = '';
+  };
+
+  const startEditingRoute = (route: LibraryRoute) => {
+    const savedRec = savedRoutesById?.get(route.id);
+    setEditingRouteId(route.id);
+    setEditName(savedRec?.name || route.name);
+    setEditNotes(savedRec?.notes || '');
+  };
+
+  const commitEditingRoute = (routeId: number) => {
+    const trimmed = editName.trim();
+    if (trimmed && onRenameSavedRoute) {
+      onRenameSavedRoute(routeId, trimmed, editNotes.trim() || undefined);
+    }
+    setEditingRouteId(null);
   };
 
   const distanceOptions: Array<{ id: DistanceBucket; label: string }> =
@@ -200,9 +278,9 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
           <div className="rl-title-wrap">
             <Icon name="book" size={16} />
             <h2>Route library</h2>
-            {totalCount > 0 && (
+            {activeTotalCount > 0 && (
               <span className="rl-count-pill">
-                {filteredRoutes.length} {filters.inMapView ? 'in view' : `of ${totalCount}`}
+                {filteredRoutes.length} {filters.inMapView ? 'in view' : `of ${activeTotalCount}`}
               </span>
             )}
           </div>
@@ -219,6 +297,72 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
           </button>
         </div>
 
+        {onChangeTab && (
+          <div className="rl-tabs-bar">
+            <div className="pe-mode-tabs rl-mode-tabs" role="tablist" aria-label="Route library mode">
+              <button
+                id="tab-library-curated"
+                type="button"
+                role="tab"
+                aria-selected={!isSavedTab}
+                className={`pe-mode-tab ${!isSavedTab ? 'active' : ''}`}
+                onClick={() => onChangeTab('curated')}
+              >
+                <Icon name="book" size={12} />
+                <span>Curated</span>
+              </button>
+              <button
+                id="tab-library-saved"
+                type="button"
+                role="tab"
+                aria-selected={isSavedTab}
+                className={`pe-mode-tab ${isSavedTab ? 'active' : ''}`}
+                onClick={() => onChangeTab('saved')}
+              >
+                <Icon name="save" size={12} />
+                <span>Saved</span>
+                {savedTotalCount > 0 && (
+                  <span className="rl-tab-badge">{savedTotalCount}</span>
+                )}
+              </button>
+            </div>
+
+            {isSavedTab && (
+              <div className="rl-backup-actions">
+                <input
+                  ref={importBackupInputRef}
+                  type="file"
+                  id="input-import-saved-json"
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                  onChange={handleImportInputChange}
+                />
+                <button
+                  id="btn-saved-import-json"
+                  type="button"
+                  className="btn-toolbar-mini"
+                  title="Import saved routes from a JSON backup file"
+                  onClick={() => importBackupInputRef.current?.click()}
+                >
+                  <Icon name="upload" size={11} />
+                  <span>Import</span>
+                </button>
+                <button
+                  id="btn-saved-export-json"
+                  type="button"
+                  className="btn-toolbar-mini"
+                  disabled={savedTotalCount === 0}
+                  title="Download all saved routes as a JSON backup file"
+                  onClick={onExportSavedJson}
+                >
+                  <Icon name="download" size={11} />
+                  <span>Backup</span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="rl-search-row">
           <div className="rl-search-input-wrap">
             <Icon name="search" size={13} className="rl-search-icon" />
@@ -226,7 +370,11 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
               id="input-library-search"
               type="search"
               value={filters.query}
-              placeholder="Search routes, regions, cafes, clubs..."
+              placeholder={
+                isSavedTab
+                  ? 'Search saved routes...'
+                  : 'Search routes, regions, cafes, clubs...'
+              }
               aria-label="Search route library"
               onChange={(e) => onChangeFilters({ query: e.target.value })}
             />
@@ -257,11 +405,15 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
         <div className="rl-selects-row">
           <select
             id="select-library-source"
-            aria-label="Filter by route collection"
+            aria-label={isSavedTab ? 'Filter by profile' : 'Filter by route collection'}
             value={filters.source}
             onChange={(e) => onChangeFilters({ source: e.target.value })}
           >
-            <option value="all">All collections ({totalCount})</option>
+            <option value="all">
+              {isSavedTab
+                ? `All profiles (${savedTotalCount})`
+                : `All collections (${totalCount})`}
+            </option>
             {sources.map((src) => (
               <option key={src.slug} value={src.slug}>
                 {src.name} ({src.count})
@@ -275,6 +427,7 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
             value={filters.sort}
             onChange={(e) => onChangeFilters({ sort: e.target.value as LibrarySort })}
           >
+            {isSavedTab && <option value="recent">Recent</option>}
             <option value="nearby">Nearest</option>
             <option value="shortest">Shortest</option>
             <option value="longest">Longest</option>
@@ -328,46 +481,64 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
       </div>
 
       <div className="rl-list" ref={listRef} onMouseLeave={() => onHoverRoute(null)}>
-        {isLoadingIndex && (
+        {!isSavedTab && isLoadingIndex && (
           <div className="rl-empty-state">
             <span className="status-spinner" aria-hidden="true" />
             <span>Loading route library...</span>
           </div>
         )}
 
-        {!isLoadingIndex && indexError && (
+        {!isSavedTab && !isLoadingIndex && indexError && (
           <div className="rl-empty-state is-error">
             <span>Could not load route library: {indexError}</span>
           </div>
         )}
 
-        {!isLoadingIndex && !indexError && filteredRoutes.length === 0 && (
+        {isSavedTab && savedTotalCount === 0 && (
           <div className="rl-empty-state">
-            <p>No routes match these filters.</p>
+            <p>No saved routes yet. Plan a route and click Save in the sidebar, or import a JSON backup.</p>
             <div className="rl-empty-actions">
-              {filters.inMapView && (
-                <button
-                  type="button"
-                  className="btn btn-outline btn-action-compact"
-                  onClick={() => onChangeFilters({ inMapView: false })}
-                >
-                  Search all UK and Ireland
-                </button>
-              )}
-              {hasActiveFilters && (
-                <button
-                  type="button"
-                  className="btn btn-outline btn-action-compact"
-                  onClick={resetFilters}
-                >
-                  Reset filters
-                </button>
-              )}
+              <button
+                type="button"
+                className="btn btn-outline btn-action-compact"
+                onClick={() => importBackupInputRef.current?.click()}
+              >
+                <Icon name="upload" size={12} />
+                <span>Import JSON backup</span>
+              </button>
             </div>
           </div>
         )}
 
-        {!isLoadingIndex && !indexError && filteredRoutes.length > 0 && (
+        {((!isSavedTab && !isLoadingIndex && !indexError) ||
+          (isSavedTab && savedTotalCount > 0)) &&
+          filteredRoutes.length === 0 && (
+            <div className="rl-empty-state">
+              <p>No routes match these filters.</p>
+              <div className="rl-empty-actions">
+                {filters.inMapView && (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-action-compact"
+                    onClick={() => onChangeFilters({ inMapView: false })}
+                  >
+                    {isSavedTab ? 'Show all saved routes' : 'Search all UK and Ireland'}
+                  </button>
+                )}
+                {hasActiveFilters && (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-action-compact"
+                    onClick={resetFilters}
+                  >
+                    Reset filters
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+        {(isSavedTab || (!isLoadingIndex && !indexError)) && filteredRoutes.length > 0 && (
           <div className="rl-list-hint">
             <span>
               Top {Math.min(TOP_SUGGESTION_COUNT, filteredRoutes.length)} shown on map
@@ -382,6 +553,8 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
           const suggestionColor =
             idx < TOP_SUGGESTION_COUNT ? SUGGESTION_COLORS[idx] : undefined;
           const src = sourceMap.get(route.src);
+          const savedRec = isSavedTab ? savedRoutesById?.get(route.id) : undefined;
+          const isEditingThis = isSavedTab && editingRouteId === route.id;
           const isLoadingCurrent = busyRouteAction === `${route.id}:current`;
           const isLoadingNew = busyRouteAction === `${route.id}:new-route`;
           const isDownloading = busyRouteAction === `${route.id}:gpx`;
@@ -405,6 +578,7 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
               onBlur={() => onHoverRoute(null)}
               onClick={() => onSelectRoute(isSelected ? null : route)}
               onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   onSelectRoute(isSelected ? null : route);
@@ -460,21 +634,76 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
                     </div>
                   )}
 
-                  {route.desc && <p className="rl-card-desc">{route.desc}</p>}
+                  {isEditingThis ? (
+                    <form
+                      className="rl-edit-form"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        commitEditingRoute(route.id);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setEditingRouteId(null);
+                        }
+                      }}
+                    >
+                      <input
+                        ref={editNameInputRef}
+                        id="input-saved-rename"
+                        type="text"
+                        className="rl-edit-input"
+                        value={editName}
+                        placeholder="Route name"
+                        aria-label="Route name"
+                        onChange={(e) => setEditName(e.target.value)}
+                      />
+                      <input
+                        id="input-saved-notes"
+                        type="text"
+                        className="rl-edit-input"
+                        value={editNotes}
+                        placeholder="Optional note"
+                        aria-label="Route note"
+                        onChange={(e) => setEditNotes(e.target.value)}
+                      />
+                      <div className="rl-edit-actions">
+                        <button
+                          type="submit"
+                          className="btn btn-primary btn-action-compact rl-edit-btn"
+                          disabled={!editName.trim()}
+                        >
+                          <span>Save</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-action-compact rl-edit-btn"
+                          onClick={() => setEditingRouteId(null)}
+                        >
+                          <span>Cancel</span>
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    route.desc && <p className="rl-card-desc">{route.desc}</p>
+                  )}
 
                   {route.stops && route.stops.length > 0 && (
                     <div className="rl-stops-block">
-                      <span className="rl-stops-heading">Stops along route</span>
+                      <span className="rl-stops-heading">
+                        {isSavedTab ? 'Waypoints' : 'Stops along route'}
+                      </span>
                       <div className="rl-stops-list">
-                        {route.stops.map((stop, idx) => {
+                        {route.stops.map((stop, sIdx) => {
                           const kindLabel = stop.kind ? STOP_KIND_LABELS[stop.kind] : undefined;
                           const canFly = Boolean(stop.pos && onFlyTo);
                           return canFly ? (
                             <button
-                              key={idx}
+                              key={sIdx}
                               type="button"
                               className="rl-stop-pill is-clickable"
-                              title="Zoom to stop on map"
+                              title="Zoom to point on map"
                               onClick={() => onFlyTo?.(stop.pos![0], stop.pos![1], 14)}
                             >
                               {kindLabel && <span className="rl-stop-kind">{kindLabel}:</span>}
@@ -482,7 +711,7 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
                               {stop.role && <span className="rl-stop-role">({stop.role})</span>}
                             </button>
                           ) : (
-                            <span key={idx} className="rl-stop-pill">
+                            <span key={sIdx} className="rl-stop-pill">
                               {kindLabel && <span className="rl-stop-kind">{kindLabel}:</span>}
                               <span>{stop.name}</span>
                               {stop.role && <span className="rl-stop-role">({stop.role})</span>}
@@ -493,22 +722,54 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
                     </div>
                   )}
 
-                  <div className="rl-attribution-row">
-                    <span className="rl-attribution-text">
-                      {src?.license || src?.name || route.src}
-                    </span>
-                    {(route.url || src?.url) && (
-                      <a
-                        href={route.url || src?.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="rl-source-link"
-                      >
-                        <span>Source guide</span>
-                        <Icon name="external" size={11} />
-                      </a>
-                    )}
-                  </div>
+                  {isSavedTab ? (
+                    <div className="rl-attribution-row">
+                      <span className="rl-attribution-text">
+                        {savedRec
+                          ? `Saved ${formatShortDate(savedRec.updatedAt)} · ${savedRec.waypoints.length} pts${savedRec.avoidAreas.length > 0 ? ` · ${savedRec.avoidAreas.length} avoid` : ''}`
+                          : formatShortDate(route.updatedAt)}
+                      </span>
+                      <div className="rl-saved-meta-actions">
+                        {!isEditingThis && onRenameSavedRoute && (
+                          <button
+                            id={`btn-saved-rename-${route.id}`}
+                            type="button"
+                            className="rl-inline-btn"
+                            onClick={() => startEditingRoute(route)}
+                          >
+                            Edit
+                          </button>
+                        )}
+                        {onDeleteSavedRoute && (
+                          <button
+                            id={`btn-saved-delete-${route.id}`}
+                            type="button"
+                            className="rl-inline-btn is-danger"
+                            onClick={() => onDeleteSavedRoute(route.id)}
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rl-attribution-row">
+                      <span className="rl-attribution-text">
+                        {src?.license || src?.name || route.src}
+                      </span>
+                      {(route.url || src?.url) && (
+                        <a
+                          href={route.url || src?.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rl-source-link"
+                        >
+                          <span>Source guide</span>
+                          <Icon name="external" size={11} />
+                        </a>
+                      )}
+                    </div>
+                  )}
 
                   <div className="rl-card-actions">
                     <button
@@ -516,7 +777,11 @@ export const RouteLibraryPanel: React.FC<RouteLibraryPanelProps> = ({
                       type="button"
                       className="btn btn-primary btn-action-compact rl-btn-open"
                       disabled={isRoutingBusy || busyRouteAction !== null}
-                      title="Snap this route onto the road network with editable waypoints and surface breakdown"
+                      title={
+                        isSavedTab
+                          ? 'Restore exact waypoints, avoid areas, and profile into the planner'
+                          : 'Snap this route onto the road network with editable waypoints and surface breakdown'
+                      }
                       onClick={(e) => handleLoadClick(e, route, 'current')}
                     >
                       {isLoadingCurrent ? (

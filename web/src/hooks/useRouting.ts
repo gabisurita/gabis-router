@@ -23,6 +23,7 @@ import {
   saveCustomProfilesToStorage,
   type CustomProfileRecord,
 } from '../utils/profile-editor.ts';
+import type { SavedRouteRecord } from '../utils/saved-routes.ts';
 
 const STORAGE_KEY = 'rsrouter_route';
 const MAX_UNDO = 50;
@@ -303,7 +304,7 @@ export function formatRouteHash(
   return '#' + parts.join('&');
 }
 
-function loadSavedRoute(): ParsedRouteState | null {
+function loadSavedWorkspace(): ParsedRouteState | null {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return null;
   try {
@@ -402,6 +403,7 @@ export function useRouting(isOfflineMode: boolean) {
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
   const [fitBoundsSeq, setFitBoundsSeq] = useState<number>(0);
+  const [savedRouteIdsByRoute, setSavedRouteIdsByRoute] = useState<Array<number | null>>([null]);
 
   const historiesRef = useRef<Array<HistoryStack<RouteHistorySnapshot>>>([
     new HistoryStack<RouteHistorySnapshot>(MAX_UNDO),
@@ -428,6 +430,28 @@ export function useRouting(isOfflineMode: boolean) {
   slotsRef.current = slots;
   const activeSlotIdxRef = useRef<number>(activeSlotIdx);
   activeSlotIdxRef.current = activeSlotIdx;
+  const savedRouteIdsByRouteRef = useRef<Array<number | null>>(savedRouteIdsByRoute);
+  savedRouteIdsByRouteRef.current = savedRouteIdsByRoute;
+
+  const setRouteSavedId = useCallback((routeIdx: number, id: number | null) => {
+    setSavedRouteIdsByRoute((prev) => {
+      const next = [...prev];
+      while (next.length <= routeIdx) next.push(null);
+      if (next[routeIdx] === id) return prev;
+      next[routeIdx] = id;
+      savedRouteIdsByRouteRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const clearDeletedSavedRouteId = useCallback((deletedId: number) => {
+    setSavedRouteIdsByRoute((prev) => {
+      if (!prev.includes(deletedId)) return prev;
+      const next = prev.map((id) => (id === deletedId ? null : id));
+      savedRouteIdsByRouteRef.current = next;
+      return next;
+    });
+  }, []);
 
   const setDraftProfile = useCallback((next: CustomProfileRecord | null) => {
     draftProfileRef.current = next;
@@ -755,6 +779,7 @@ export function useRouting(isOfflineMode: boolean) {
           });
           slotsRef.current = nextSlots;
           setSlotsState(nextSlots);
+          setRouteSavedId(targetRouteIdx, null);
 
           saveToUrlAndStorage(nextSlots, activeSlotIdxRef.current);
           setFitBoundsSeq((s) => s + 1);
@@ -855,7 +880,7 @@ export function useRouting(isOfflineMode: boolean) {
     }
 
     return worker;
-  }, [postSlotRouteRequest, saveToUrlAndStorage, updateUndoRedo]);
+  }, [postSlotRouteRequest, saveToUrlAndStorage, setRouteSavedId, updateUndoRedo]);
 
   /**
    * Aborts an in-flight route search for `profileId` by terminating the blocked Web Worker and
@@ -955,7 +980,7 @@ export function useRouting(isOfflineMode: boolean) {
 
     // Initial load from Hash or LocalStorage
     const fromLink = /(?:^#|&)(?:r|r2|r3|nogos|nogos2|nogos3|p|p2|p3)=/.test(location.hash);
-    const saved = loadSavedRoute();
+    const saved = loadSavedWorkspace();
     const initial = fromLink ? parseRouteHash() : saved;
     if (initial && initial.slots.length > 0) {
       const savedNamePool: LatLon[] = saved
@@ -983,6 +1008,9 @@ export function useRouting(isOfflineMode: boolean) {
         { length: initRouteCount },
         () => new HistoryStack<RouteHistorySnapshot>(MAX_UNDO),
       );
+      const initSavedIds = Array.from({ length: initRouteCount }, () => null);
+      savedRouteIdsByRouteRef.current = initSavedIds;
+      setSavedRouteIdsByRoute(initSavedIds);
       activeSlotRouteIdRef.current = initSlots.map(() => null);
       requestedSlotAltRef.current = initSlots.map(() => 0);
       shownSlotAltRef.current = initSlots.map(() => 0);
@@ -1306,6 +1334,7 @@ export function useRouting(isOfflineMode: boolean) {
       slotsRef.current = nextSlots;
       setActiveSlotIdxState(newSlotIdx);
       setSlotsState(nextSlots);
+      setRouteSavedId(newRouteIdx, null);
       updateUndoRedo(newSlotIdx);
       saveToUrlAndStorage(nextSlots, newSlotIdx);
 
@@ -1318,7 +1347,7 @@ export function useRouting(isOfflineMode: boolean) {
         setStatus('Click on the map or search to set start and end points.');
       }
     },
-    [postSlotRouteRequest, saveToUrlAndStorage, updateUndoRedo],
+    [postSlotRouteRequest, saveToUrlAndStorage, setRouteSavedId, updateUndoRedo],
   );
 
   const removeRoute = useCallback(
@@ -1347,6 +1376,12 @@ export function useRouting(isOfflineMode: boolean) {
       });
 
       historiesRef.current.splice(routeIdx, 1);
+      setSavedRouteIdsByRoute((prev) => {
+        const next = [...prev];
+        next.splice(routeIdx, 1);
+        savedRouteIdsByRouteRef.current = next;
+        return next;
+      });
       activeSlotRouteIdRef.current = nextRouteIds;
       requestedSlotAltRef.current = nextReqAlts;
       shownSlotAltRef.current = nextShownAlts;
@@ -1716,10 +1751,11 @@ export function useRouting(isOfflineMode: boolean) {
     });
     slotsRef.current = nextSlots;
     setSlotsState(nextSlots);
+    setRouteSavedId(activeRouteIdx, null);
     setIsError(false);
     saveToUrlAndStorage(nextSlots, activeIdx);
     setStatus('Route cleared.');
-  }, [saveToUrlAndStorage, updateUndoRedo]);
+  }, [saveToUrlAndStorage, setRouteSavedId, updateUndoRedo]);
 
   const undo = useCallback(() => {
     const activeIdx = activeSlotIdxRef.current;
@@ -1980,6 +2016,154 @@ export function useRouting(isOfflineMode: boolean) {
     [postSlotRouteRequest, saveToUrlAndStorage],
   );
 
+  const loadSavedRoute = useCallback(
+    (record: SavedRouteRecord, mode: 'current' | 'new-route' = 'current') => {
+      let resolvedProfile: ProfileName = record.profile;
+      if (record.customProfile && record.profile === record.customProfile.id) {
+        const cp = record.customProfile;
+        const exists = customProfilesRef.current.some((c) => c.id === cp.id);
+        if (!exists) {
+          const nextCustom = [...customProfilesRef.current, cp];
+          customProfilesRef.current = nextCustom;
+          setCustomProfiles(nextCustom);
+          saveCustomProfilesToStorage(nextCustom);
+        }
+        workerRef.current?.postMessage({
+          type: 'LOAD_CUSTOM_PROFILE',
+          name: cp.id,
+          content: cp.dsl,
+        } satisfies WorkerMessage);
+      } else if (
+        !(record.profile in PROFILE_INFO) &&
+        !customProfilesRef.current.some((c) => c.id === record.profile) &&
+        draftProfileRef.current?.id !== record.profile
+      ) {
+        resolvedProfile = PROFILE_ORDER[0];
+      }
+
+      const newWps = record.waypoints.map((w) => ({ ...w }));
+      const newAvoids = record.avoidAreas.map((a) => ({ ...a }));
+      const alt = Math.max(0, Math.min(3, Math.trunc(record.alternativeIdx || 0)));
+      const hasWps = newWps.length >= 2;
+      const currentRouteCount = getRouteCount(slotsRef.current);
+
+      if (mode === 'new-route' && currentRouteCount < MAX_ROUTES) {
+        const usedColors = new Set(slotsRef.current.map((s, idx) => getSlotColor(s, idx).id));
+        const nextColor =
+          ROUTE_COLOR_PALETTE.find((c) => !usedColors.has(c.id)) || ROUTE_COLOR_PALETTE[0];
+        const newRouteIdx = currentRouteCount;
+        const newSlotIdx = slotsRef.current.length;
+
+        const nextSlots: RouteSlotState[] = [
+          ...slotsRef.current,
+          {
+            routeIdx: newRouteIdx,
+            profile: resolvedProfile,
+            waypoints: newWps,
+            avoidAreas: newAvoids,
+            alternativeIdx: alt,
+            route: null,
+            isRouting: hasWps && Boolean(workerRef.current),
+            colorId: nextColor.id,
+          },
+        ];
+        historiesRef.current[newRouteIdx] = new HistoryStack<RouteHistorySnapshot>(MAX_UNDO);
+        activeSlotRouteIdRef.current.push(null);
+        requestedSlotAltRef.current.push(alt);
+        shownSlotAltRef.current.push(alt);
+
+        activeSlotIdxRef.current = newSlotIdx;
+        slotsRef.current = nextSlots;
+        setActiveSlotIdxState(newSlotIdx);
+        setSlotsState(nextSlots);
+        setRouteSavedId(newRouteIdx, record.id);
+        updateUndoRedo(newSlotIdx);
+        saveToUrlAndStorage(nextSlots, newSlotIdx);
+        setFitBoundsSeq((s) => s + 1);
+
+        if (hasWps && workerRef.current) {
+          setStatus('Calculating route...');
+          setIsError(false);
+          postSlotRouteRequest(newSlotIdx, newWps, resolvedProfile, newAvoids, alt);
+        }
+        return;
+      }
+
+      const activeIdx = activeSlotIdxRef.current;
+      const targetRouteIdx = slotsRef.current[activeIdx]?.routeIdx ?? 0;
+      const firstRouteSlotIdx = slotsRef.current.findIndex(
+        (s) => (s.routeIdx ?? 0) === targetRouteIdx,
+      );
+      if (firstRouteSlotIdx === -1) return;
+
+      const primarySlotIdx =
+        (slotsRef.current[activeIdx]?.routeIdx ?? 0) === targetRouteIdx
+          ? activeIdx
+          : firstRouteSlotIdx;
+      const currentSlot = slotsRef.current[primarySlotIdx];
+
+      if (currentSlot.waypoints.length > 0 || currentSlot.avoidAreas.length > 0) {
+        if (!historiesRef.current[targetRouteIdx]) {
+          historiesRef.current[targetRouteIdx] = new HistoryStack(MAX_UNDO);
+        }
+        historiesRef.current[targetRouteIdx].record({
+          waypoints: currentSlot.waypoints.map((w) => ({ ...w })),
+          avoidAreas: currentSlot.avoidAreas.map((a) => ({ ...a })),
+        });
+      }
+      if (activeImportRef.current?.routeIdx === targetRouteIdx) {
+        activeImportRef.current = null;
+      }
+
+      const slotsToRoute: Array<{ idx: number; prof: ProfileName; alt: number }> = [];
+      const nextSlots = slotsRef.current.map((s, idx) => {
+        if ((s.routeIdx ?? 0) !== targetRouteIdx) return s;
+        const isPrimary = idx === primarySlotIdx;
+        const slotProf = isPrimary ? resolvedProfile : s.profile;
+        const slotAlt = isPrimary ? alt : 0;
+        activeSlotRouteIdRef.current[idx] = null;
+        requestedSlotAltRef.current[idx] = slotAlt;
+        shownSlotAltRef.current[idx] = slotAlt;
+        if (hasWps) {
+          slotsToRoute.push({ idx, prof: slotProf, alt: slotAlt });
+        }
+        return {
+          ...s,
+          profile: slotProf,
+          waypoints: newWps.map((w) => ({ ...w })),
+          avoidAreas: newAvoids.map((a) => ({ ...a })),
+          alternativeIdx: slotAlt,
+          route: null,
+          isRouting: hasWps && Boolean(workerRef.current),
+        };
+      });
+
+      slotsRef.current = nextSlots;
+      setSlotsState(nextSlots);
+      setRouteSavedId(targetRouteIdx, record.id);
+      updateUndoRedo(primarySlotIdx);
+      saveToUrlAndStorage(nextSlots, activeIdx);
+      setFitBoundsSeq((s) => s + 1);
+
+      if (slotsToRoute.length > 0 && workerRef.current) {
+        setStatus('Calculating route...');
+        setIsError(false);
+        for (const item of slotsToRoute) {
+          postSlotRouteRequest(item.idx, newWps, item.prof, newAvoids, item.alt);
+        }
+      }
+    },
+    [postSlotRouteRequest, saveToUrlAndStorage, setRouteSavedId, updateUndoRedo],
+  );
+
+  const setActiveSavedRouteId = useCallback(
+    (id: number | null) => {
+      const currentRouteIdx = slotsRef.current[activeSlotIdxRef.current]?.routeIdx ?? 0;
+      setRouteSavedId(currentRouteIdx, id);
+    },
+    [setRouteSavedId],
+  );
+
   const activeSlot = slots[activeSlotIdx] ||
     slots[0] || {
       routeIdx: 0,
@@ -2037,6 +2221,10 @@ export function useRouting(isOfflineMode: boolean) {
     inspectPoint,
     importGpxContent,
     importGpxFile,
+    loadSavedRoute,
+    activeSavedRouteId: savedRouteIdsByRoute[activeRouteIdx] ?? null,
+    setActiveSavedRouteId,
+    clearDeletedSavedRouteId,
     addWaypoint,
     insertWaypointAtLeg,
     moveWaypoint,

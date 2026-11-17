@@ -23,12 +23,20 @@ import type { Basemap } from './basemap.ts';
 import type { Theme } from './theme.ts';
 import type { Units } from './format.ts';
 import { getOfflineStyle, getOnlineStyle } from './utils/map-styles.ts';
+import type { RouteLibraryTab } from './components/RouteLibraryPanel.tsx';
+import { serializeSavedRoutesBackup, type SavedRouteRecord } from './utils/saved-routes.ts';
 
 export interface McpUiControls {
   isControlsCollapsed: boolean;
   setIsControlsCollapsed: React.Dispatch<React.SetStateAction<boolean>>;
   isProfileEditorOpen: boolean;
   setIsProfileEditorOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  isRouteLibraryOpen: boolean;
+  setIsRouteLibraryOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  libraryTab: RouteLibraryTab;
+  setLibraryTab: React.Dispatch<React.SetStateAction<RouteLibraryTab>>;
+  savedRoutes: SavedRouteRecord[];
+  importSavedJsonText: (jsonText: string) => void;
   isRouteInfoCollapsed: boolean;
   setIsRouteInfoCollapsed: React.Dispatch<React.SetStateAction<boolean>>;
   isSettingsOpen: boolean;
@@ -153,6 +161,7 @@ function buildStateSnapshot(ctx: McpBridgeContext) {
   return {
     activeSlotIdx: ctx.routing.activeSlotIdx,
     activeRouteIdx: ctx.routing.activeRouteIdx,
+    activeSavedRouteId: ctx.routing.activeSavedRouteId,
     routeCount: ctx.routing.routeCount,
     waypoints: ctx.routing.waypoints,
     profile: ctx.routing.profile,
@@ -181,6 +190,20 @@ function buildStateSnapshot(ctx: McpBridgeContext) {
     ui: {
       isControlsCollapsed: ctx.ui.isControlsCollapsed,
       isProfileEditorOpen: ctx.ui.isProfileEditorOpen,
+      isRouteLibraryOpen: ctx.ui.isRouteLibraryOpen,
+      libraryTab: ctx.ui.libraryTab,
+      savedRoutes: ctx.ui.savedRoutes.map((r) => ({
+        id: r.id,
+        name: r.name,
+        notes: r.notes,
+        profile: r.profile,
+        km: r.km,
+        asc: r.asc,
+        surf: r.surf,
+        loop: r.loop,
+        waypointCount: r.waypoints.length,
+        avoidCount: r.avoidAreas.length,
+      })),
       isRouteInfoCollapsed: ctx.ui.isRouteInfoCollapsed,
       isSettingsOpen: ctx.ui.isSettingsOpen,
       isAboutOpen: ctx.ui.isAboutOpen,
@@ -251,6 +274,8 @@ function buildStateSnapshot(ctx: McpBridgeContext) {
           route2SourceFeatures: hasLayerFeatures('route-2'),
           avoidSourceFeatures: hasLayerFeatures('nogo-areas'),
           highlightSourceFeatures: hasLayerFeatures('route-segment-highlight'),
+          librarySuggestionsFeatures: hasLayerFeatures('library-suggestions'),
+          libraryPreviewFeatures: hasLayerFeatures('library-preview'),
         }
       : null,
   };
@@ -911,6 +936,19 @@ async function handleMcpCommand(payload: {
           waitsForRoute = true;
           break;
         }
+        case 'export_saved_json': {
+          const backupJson = serializeSavedRoutesBackup(cur.ui.savedRoutes);
+          result = {
+            ...buildStateSnapshot(ctxRef.current),
+            backupJson,
+          };
+          break;
+        }
+        case 'import_saved_json': {
+          cur.ui.importSavedJsonText(String(args.jsonText || ''));
+          await sleep(80);
+          break;
+        }
         default:
           throw new Error(`Unknown interact action: ${action}`);
       }
@@ -923,7 +961,8 @@ async function handleMcpCommand(payload: {
       } else {
         await sleep(80);
       }
-      result = buildStateSnapshot(ctxRef.current);
+      const snap = buildStateSnapshot(ctxRef.current);
+      result = result?.backupJson ? { ...snap, backupJson: result.backupJson } : snap;
     } else if (command === 'compare_gpx') {
       if (args.gpxContent) {
         ctxRef.current.routing.importGpxContent(String(args.gpxContent));
