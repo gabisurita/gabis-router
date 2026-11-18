@@ -79,9 +79,13 @@ fn test_gpx_map_matching_and_via_correction() {
         };
         let lat = pt.lat + jitter;
         let lon = pt.lon - jitter;
-        gpx_xml.push_str(&format!("<trkpt lat=\"{lat:.6}\" lon=\"{lon:.6}\"></trkpt>\n"));
+        gpx_xml.push_str(&format!(
+            "<trkpt lat=\"{lat:.6}\" lon=\"{lon:.6}\"></trkpt>\n"
+        ));
         if i == 10 {
-            gpx_xml.push_str(&format!("<trkpt lat=\"{lat:.6}\" lon=\"{lon:.6}\"></trkpt>\n"));
+            gpx_xml.push_str(&format!(
+                "<trkpt lat=\"{lat:.6}\" lon=\"{lon:.6}\"></trkpt>\n"
+            ));
         }
     }
     gpx_xml.push_str("</trkseg></trk></gpx>");
@@ -168,7 +172,10 @@ fn test_gpx_map_matching_and_via_correction() {
     eprintln!("Lazy GPX extract_gpx_waypoints completed in {lazy_ms:.1} ms");
     assert_eq!(lazy_wps.len(), 3);
     assert!((lazy_matched.total_distance_m - detour_full_match.total_distance_m).abs() < 25.0);
-    assert!(lazy_graph.has_cell_provider(), "CellProvider should be restored after GPX match");
+    assert!(
+        lazy_graph.has_cell_provider(),
+        "CellProvider should be restored after GPX match"
+    );
 }
 
 #[test]
@@ -197,11 +204,9 @@ fn test_custom_product_profiles() {
     let router = AStarRouter::new();
 
     for prof_name in ["gabis-safe-road", "gabis-fast-city", "gabis-lite-gravel"] {
-        let profile = Profile::load_from_file(
-            repo_path(&format!("profiles/{prof_name}.brf")),
-            &lookups,
-        )
-        .unwrap_or_else(|e| panic!("Failed to load {prof_name}: {e}"));
+        let profile =
+            Profile::load_from_file(repo_path(&format!("profiles/{prof_name}.brf")), &lookups)
+                .unwrap_or_else(|e| panic!("Failed to load {prof_name}: {e}"));
         let route = router
             .query(&graph, &lookups, &profile, &[start, target])
             .compute()

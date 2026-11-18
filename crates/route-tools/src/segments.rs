@@ -176,7 +176,9 @@ pub fn inspect_nearest_way(
     let (desc_id, is_reverse) = best_desc?;
     let desc_bytes = graph.descriptions.get(desc_id as usize)?.as_slice();
     let mut way_buf = vec![0i32; lookups.way.names.len()];
-    lookups.way.decode_into(&mut way_buf, is_reverse, desc_bytes);
+    lookups
+        .way
+        .decode_into(&mut way_buf, is_reverse, desc_bytes);
     let way_kv = lookups.way.format_key_values(&way_buf);
     let (surface, highway, noise_class, traffic_class, maxspeed, town_class, lit, sidewalk) =
         parse_way_tags(&way_kv);
@@ -212,7 +214,16 @@ pub struct RouteSegment {
 
 fn parse_way_tags(way_kv: &str) -> (String, String, u8, u8, u32, u8, bool, bool) {
     if way_kv == "directsegment" {
-        return (String::new(), "beeline".to_string(), 0, 0, 0, 0, false, false);
+        return (
+            String::new(),
+            "beeline".to_string(),
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+        );
     }
 
     let mut is_reverse = false;
@@ -263,7 +274,11 @@ fn parse_way_tags(way_kv: &str) -> (String, String, u8, u8, u32, u8, bool, bool)
         }
     }
 
-    let dir_speed = if is_reverse { maxspeed_bwd } else { maxspeed_fwd };
+    let dir_speed = if is_reverse {
+        maxspeed_bwd
+    } else {
+        maxspeed_fwd
+    };
     let speed_str = dir_speed.or(maxspeed_base).or(zone_maxspeed);
     let maxspeed = match speed_str {
         Some("urban") => 50,
@@ -285,7 +300,9 @@ fn parse_way_tags(way_kv: &str) -> (String, String, u8, u8, u32, u8, bool, bool)
         traffic = 7;
     }
 
-    (surface, highway, noise, traffic, maxspeed, town, lit, sidewalk)
+    (
+        surface, highway, noise, traffic, maxspeed, town, lit, sidewalk,
+    )
 }
 
 /// Extracts merged `RouteSegment` intervals across `route` from its point distances and way messages.

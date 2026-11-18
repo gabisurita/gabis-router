@@ -381,19 +381,18 @@ fn merge_tile_lines(lines: Vec<Vec<(i32, i32)>>) -> Vec<Vec<(i32, i32)>> {
     merged
 }
 
+type TileFeatureGroups = BTreeMap<(CycleNetwork, bool, u32), Vec<Vec<(i32, i32)>>>;
+
 /// Encodes a single tile's grouped polylines into an MVT protobuf byte buffer.
-fn encode_mvt_tile(
-    groups: &BTreeMap<(CycleNetwork, bool, u32), Vec<Vec<(i32, i32)>>>,
-    ref_strings: &[String],
-) -> Vec<u8> {
+fn encode_mvt_tile(groups: &TileFeatureGroups, ref_strings: &[String]) -> Vec<u8> {
     let mut layer = Vec::new();
     // field 15: version = 2
-    write_varint(&mut layer, ((15 << 3) | 0) as u64);
+    write_varint(&mut layer, (15 << 3) as u64);
     write_varint(&mut layer, 2);
     // field 1: name = "cycle_routes"
     encode_string_field(&mut layer, 1, "cycle_routes");
     // field 5: extent = EXTENT
-    write_varint(&mut layer, ((5 << 3) | 0) as u64);
+    write_varint(&mut layer, (5 << 3) as u64);
     write_varint(&mut layer, EXTENT as u64);
 
     // Keys: 0 = "network", 1 = "state", 2 = "ref"
@@ -479,7 +478,7 @@ fn encode_mvt_tile(
         write_varint(&mut feat_buf, tags_buf.len() as u64);
         feat_buf.extend_from_slice(&tags_buf);
         // field 3: type = 2 (LINESTRING)
-        write_varint(&mut feat_buf, ((3 << 3) | 0) as u64);
+        write_varint(&mut feat_buf, (3 << 3) as u64);
         write_varint(&mut feat_buf, 2);
         // field 4: geometry (packed varint)
         write_varint(&mut feat_buf, ((4 << 3) | 2) as u64);
@@ -655,7 +654,10 @@ fn decode_and_simplify_mvt(raw_tile: &[u8], tol: f64) -> io::Result<Vec<u8>> {
         } else if wire == 0 {
             let _ = read_varint(raw_tile, &mut pos)?;
         } else {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected MVT wire type"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected MVT wire type",
+            ));
         }
     }
     let Some(layer) = layer_slice else {
@@ -705,7 +707,7 @@ fn decode_and_simplify_mvt(raw_tile: &[u8], tol: f64) -> io::Result<Vec<u8>> {
 
     let mut ref_strings: Vec<String> = Vec::new();
     let mut ref_lookup: HashMap<String, u32> = HashMap::new();
-    let mut groups: BTreeMap<(CycleNetwork, bool, u32), Vec<Vec<(i32, i32)>>> = BTreeMap::new();
+    let mut groups: TileFeatureGroups = BTreeMap::new();
 
     for feat in features {
         let mut fpos = 0usize;
@@ -802,7 +804,10 @@ fn decode_and_simplify_mvt(raw_tile: &[u8], tol: f64) -> io::Result<Vec<u8>> {
             }
         }
         if !lines.is_empty() {
-            groups.entry((net, proposed, ref_idx)).or_default().extend(lines);
+            groups
+                .entry((net, proposed, ref_idx))
+                .or_default()
+                .extend(lines);
         }
     }
 
@@ -815,7 +820,10 @@ fn decode_and_simplify_mvt(raw_tile: &[u8], tol: f64) -> io::Result<Vec<u8>> {
 fn repack_existing_pmtiles(in_path: &Path, out_path: &Path) -> io::Result<()> {
     let raw = fs::read(in_path)?;
     if raw.len() < 127 || &raw[0..7] != b"PMTiles" {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid PMTiles header"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid PMTiles header",
+        ));
     }
     let u64_at = |o: usize| u64::from_le_bytes(raw[o..o + 8].try_into().unwrap());
     let i32_at = |o: usize| i32::from_le_bytes(raw[o..o + 4].try_into().unwrap());
@@ -920,7 +928,10 @@ fn main() -> io::Result<()> {
             .get(2)
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("web/map-tiles/cycle_routes.pmtiles"));
-        let out_path = args.get(3).map(PathBuf::from).unwrap_or_else(|| in_path.clone());
+        let out_path = args
+            .get(3)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| in_path.clone());
         return repack_existing_pmtiles(&in_path, &out_path);
     }
     let segments_arg = args
@@ -1138,10 +1149,7 @@ fn main() -> io::Result<()> {
     for z in MIN_ZOOM..=MAX_ZOOM {
         let n = (1u32 << z) as f64;
         let max_tile = (1u32 << z) - 1;
-        let mut z_tiles: BTreeMap<
-            (u32, u32),
-            BTreeMap<(CycleNetwork, bool, u32), Vec<Vec<(i32, i32)>>>,
-        > = BTreeMap::new();
+        let mut z_tiles: BTreeMap<(u32, u32), TileFeatureGroups> = BTreeMap::new();
 
         for way in &ways {
             if z < way.network.min_zoom() {

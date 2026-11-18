@@ -1,5 +1,7 @@
 # Gabi's Router
 
+[![CI](https://github.com/gabisurita/gabis-router/actions/workflows/ci.yml/badge.svg)](https://github.com/gabisurita/gabis-router/actions/workflows/ci.yml)
+
 <p align="center">
   <img src="web/public/logo.png" width="110" alt="Gabi's Router logo" />
 </p>

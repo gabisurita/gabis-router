@@ -12,7 +12,7 @@ use std::sync::Arc;
 use brouter_rs::dsl::evaluator::ProfileEvaluator;
 use brouter_rs::dsl::lookups::LookupData;
 use brouter_rs::dsl::parser::Profile;
-use brouter_rs::graph::routing_graph::{CellProvider, MICRO_CACHE_CELL_SIZE, RoutingGraph};
+use brouter_rs::graph::routing_graph::{CellProvider, RoutingGraph, MICRO_CACHE_CELL_SIZE};
 use brouter_rs::graph::spatial::{
     self, distance, get_difference_from_direction, get_direction, lat_to_ilat, lon_to_ilon,
 };
@@ -63,7 +63,10 @@ pub fn parse_gpx_points(gpx_xml: &str) -> Result<Vec<(f64, f64)>, String> {
             return Ok(pts);
         }
     }
-    Err("GPX document must contain at least 2 valid track, route, or waypoint coordinates".to_string())
+    Err(
+        "GPX document must contain at least 2 valid track, route, or waypoint coordinates"
+            .to_string(),
+    )
 }
 
 fn extract_xml_tag_coords(xml: &str, tag_name: &str) -> Vec<(f64, f64)> {
@@ -440,8 +443,7 @@ fn snap_track_point_to_road(
                     lookups
                         .way
                         .decode_into(&mut way_lookup_buf, edge.is_reverse, desc_bytes);
-                    if dedup_idx == 0
-                        && !evaluator.profile.check_start_way_decoded(&way_lookup_buf)
+                    if dedup_idx == 0 && !evaluator.profile.check_start_way_decoded(&way_lookup_buf)
                     {
                         break;
                     }
@@ -1124,19 +1126,23 @@ fn match_track_with_minimal_waypoints_ref(
         let end_c = wp_coord(end_idx);
 
         let routed = router.route_leg_ref(
-            graph, lookups, profile, start_c, end_c, 0, &[], None, false, timode,
+            graph,
+            lookups,
+            profile,
+            start_c,
+            end_c,
+            0,
+            &[],
+            None,
+            false,
+            timode,
         );
 
         match routed {
             Ok(leg) => {
-                if let Some(split_k) = find_worst_deviation_index(
-                    &ref_2d,
-                    &cum_dist,
-                    start_idx,
-                    end_idx,
-                    &leg,
-                    tol_m,
-                ) {
+                if let Some(split_k) =
+                    find_worst_deviation_index(&ref_2d, &cum_dist, start_idx, end_idx, &leg, tol_m)
+                {
                     failed_spans.insert((start_idx, end_idx));
                     keep[split_k] = true;
                     stack.push((split_k, end_idx));
@@ -1275,13 +1281,30 @@ fn point_to_segment_dist_sq_m(pt: Point2D, a: Point2D, b: Point2D, kx: f64, ky: 
     rx * rx + ry * ry
 }
 
-fn min_dist_to_polyline_with_hint_m(
-    pt: Point2D,
-    poly: &[Point2D],
+#[derive(Clone, Copy)]
+struct MeterScales {
     kx: f64,
     ky: f64,
     inv_kx: f64,
     inv_ky: f64,
+}
+
+impl MeterScales {
+    fn from_ilat(ilat: i32) -> Self {
+        let [kx, ky] = spatial::get_lon_lat_to_meter_scales(ilat);
+        Self {
+            kx,
+            ky,
+            inv_kx: 1.0 / kx.max(1e-6),
+            inv_ky: 1.0 / ky.max(1e-6),
+        }
+    }
+}
+
+fn min_dist_to_polyline_with_hint_m(
+    pt: Point2D,
+    poly: &[Point2D],
+    scales: MeterScales,
     hint_seg: &mut usize,
     early_tol_sq: f64,
 ) -> f64 {
@@ -1300,13 +1323,8 @@ fn min_dist_to_polyline_with_hint_m(
     // Check local window around hint_seg first for sequential points along a matched route
     let win_start = h.saturating_sub(2);
     let win_end = (h + 6).min(n_segs);
-    for (idx, seg) in poly
-        .windows(2)
-        .enumerate()
-        .take(win_end)
-        .skip(win_start)
-    {
-        let d_sq = point_to_segment_dist_sq_m(pt, seg[0], seg[1], kx, ky);
+    for (idx, seg) in poly.windows(2).enumerate().take(win_end).skip(win_start) {
+        let d_sq = point_to_segment_dist_sq_m(pt, seg[0], seg[1], scales.kx, scales.ky);
         if d_sq < best_sq {
             best_sq = d_sq;
             best_idx = idx;
@@ -1318,8 +1336,8 @@ fn min_dist_to_polyline_with_hint_m(
     }
 
     let mut bound_m = best_sq.sqrt();
-    let mut max_dlon = (bound_m * inv_kx) as i32 + 20;
-    let mut max_dlat = (bound_m * inv_ky) as i32 + 20;
+    let mut max_dlon = (bound_m * scales.inv_kx) as i32 + 20;
+    let mut max_dlat = (bound_m * scales.inv_ky) as i32 + 20;
 
     for (idx, seg) in poly.windows(2).enumerate() {
         if idx >= win_start && idx < win_end {
@@ -1334,7 +1352,7 @@ fn min_dist_to_polyline_with_hint_m(
         {
             continue;
         }
-        let d_sq = point_to_segment_dist_sq_m(pt, a, b, kx, ky);
+        let d_sq = point_to_segment_dist_sq_m(pt, a, b, scales.kx, scales.ky);
         if d_sq < best_sq {
             best_sq = d_sq;
             best_idx = idx;
@@ -1343,8 +1361,8 @@ fn min_dist_to_polyline_with_hint_m(
                 return best_sq.sqrt();
             }
             bound_m = best_sq.sqrt();
-            max_dlon = (bound_m * inv_kx) as i32 + 20;
-            max_dlat = (bound_m * inv_ky) as i32 + 20;
+            max_dlon = (bound_m * scales.inv_kx) as i32 + 20;
+            max_dlat = (bound_m * scales.inv_ky) as i32 + 20;
         }
     }
 
@@ -1356,23 +1374,11 @@ fn exceeds_polyline_tolerance_m(pts: &[Point2D], poly: &[Point2D], tol_m: f64) -
     if pts.is_empty() || poly.is_empty() {
         return false;
     }
-    let [kx, ky] = spatial::get_lon_lat_to_meter_scales(poly[poly.len() / 2].lat);
-    let inv_kx = 1.0 / kx.max(1e-6);
-    let inv_ky = 1.0 / ky.max(1e-6);
+    let scales = MeterScales::from_ilat(poly[poly.len() / 2].lat);
     let tol_sq = tol_m * tol_m;
     let mut hint_seg = 0usize;
     for &pt in pts {
-        if min_dist_to_polyline_with_hint_m(
-            pt,
-            poly,
-            kx,
-            ky,
-            inv_kx,
-            inv_ky,
-            &mut hint_seg,
-            tol_sq,
-        ) > tol_m
-        {
+        if min_dist_to_polyline_with_hint_m(pt, poly, scales, &mut hint_seg, tol_sq) > tol_m {
             return true;
         }
     }
@@ -1401,9 +1407,7 @@ fn find_worst_deviation_index(
         return None;
     }
 
-    let [kx, ky] = spatial::get_lon_lat_to_meter_scales(ref_2d[(start_idx + end_idx) / 2].lat);
-    let inv_kx = 1.0 / kx.max(1e-6);
-    let inv_ky = 1.0 / ky.max(1e-6);
+    let scales = MeterScales::from_ilat(ref_2d[(start_idx + end_idx) / 2].lat);
     let tol_sq = tol_m * tol_m;
 
     struct Excursion {
@@ -1421,16 +1425,7 @@ fn find_worst_deviation_index(
         if cum_dist[k] - cum_dist[start_idx] < tol_m || cum_dist[end_idx] - cum_dist[k] < tol_m {
             continue;
         }
-        let d = min_dist_to_polyline_with_hint_m(
-            ref_2d[k],
-            &leg_2d,
-            kx,
-            ky,
-            inv_kx,
-            inv_ky,
-            &mut hint_seg,
-            tol_sq,
-        );
+        let d = min_dist_to_polyline_with_hint_m(ref_2d[k], &leg_2d, scales, &mut hint_seg, tol_sq);
         if d > tol_m {
             match &mut cur_exc {
                 Some(exc) => {
@@ -1511,16 +1506,7 @@ fn find_worst_deviation_index(
     let mut worst_lp = None;
     let mut ref_hint_seg = 0usize;
     for &lp in &leg_2d {
-        let d = min_dist_to_polyline_with_hint_m(
-            lp,
-            ref_slice,
-            kx,
-            ky,
-            inv_kx,
-            inv_ky,
-            &mut ref_hint_seg,
-            tol_sq,
-        );
+        let d = min_dist_to_polyline_with_hint_m(lp, ref_slice, scales, &mut ref_hint_seg, tol_sq);
         if d > max_leg_dev {
             max_leg_dev = d;
             worst_lp = Some(lp);

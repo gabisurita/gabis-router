@@ -45,12 +45,7 @@ impl Rd5SegmentReader for JsRd5SegmentReader {
                 &JsValue::from_f64(start as f64),
                 &JsValue::from_f64(end as f64),
             )
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("JS read_range failed: {e:?}"),
-                )
-            })?;
+            .map_err(|e| std::io::Error::other(format!("JS read_range failed: {e:?}")))?;
         let arr: js_sys::Uint8Array = val.unchecked_into();
         Ok(arr.to_vec())
     }
@@ -63,6 +58,12 @@ pub struct WasmRouter {
     graph: RoutingGraph,
     router: AStarRouter,
     lazy_provider: Option<Arc<LazyRd5Provider>>,
+}
+
+impl Default for WasmRouter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[wasm_bindgen]
@@ -164,7 +165,9 @@ impl WasmRouter {
             return Err(JsValue::from_str("Lookups not loaded"));
         };
         let Some(profile) = self.profiles.get(profile_name) else {
-            return Err(JsValue::from_str(&format!("Profile not found: {profile_name}")));
+            return Err(JsValue::from_str(&format!(
+                "Profile not found: {profile_name}"
+            )));
         };
 
         let parsed = parse_lonlats(waypoints_str, None).map_err(|e| JsValue::from_str(&e))?;
@@ -202,7 +205,9 @@ impl WasmRouter {
             return Err(JsValue::from_str("Lookups not loaded"));
         };
         let Some(profile) = self.profiles.get(profile_name) else {
-            return Err(JsValue::from_str(&format!("Profile not found: {profile_name}")));
+            return Err(JsValue::from_str(&format!(
+                "Profile not found: {profile_name}"
+            )));
         };
         let mut options = MapMatchOptions::default();
         if tolerance_m > 0.0 {
@@ -224,8 +229,9 @@ impl WasmRouter {
             .map(|(lon, lat)| serde_json::json!({ "lon": lon, "lat": lat }))
             .collect();
         let route_val: serde_json::Value =
-            serde_json::from_str(&to_geojson_with_segments(&route, profile_name))
-                .map_err(|e| JsValue::from_str(&format!("Failed to serialize route GeoJSON: {e}")))?;
+            serde_json::from_str(&to_geojson_with_segments(&route, profile_name)).map_err(|e| {
+                JsValue::from_str(&format!("Failed to serialize route GeoJSON: {e}"))
+            })?;
 
         let out = serde_json::json!({
             "waypoints": wps_json,
@@ -253,8 +259,7 @@ impl WasmRouter {
 
 impl WasmRouter {
     fn prune_profile_cost_cache(&self) {
-        let active_hashes: HashSet<u64> =
-            self.profiles.values().map(|p| p.content_hash).collect();
+        let active_hashes: HashSet<u64> = self.profiles.values().map(|p| p.content_hash).collect();
         if let Ok(mut cache) = self.graph.profile_cost_cache.write() {
             let before = cache.len();
             cache.retain(|hash, _| active_hashes.contains(hash));
