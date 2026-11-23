@@ -1,3 +1,5 @@
+import type { RobustnessProbeResult, RobustnessProbeSpec } from './utils/robustness.ts';
+
 export type BuiltinProfileName =
   | 'fastbike'
   | 'fastbike-lowtraffic'
@@ -188,6 +190,12 @@ export interface PointWayInfo {
   sidewalk?: boolean;
 }
 
+export interface RobustnessProbeWorkerRequest {
+  waypoints: LatLon[];
+  nogos?: AvoidArea[];
+  probe: RobustnessProbeSpec;
+}
+
 export type WorkerPhase = 'idle' | 'downloading' | 'calculating';
 
 export type WorkerMessage =
@@ -200,8 +208,17 @@ export type WorkerMessage =
   | { type: 'ROUTE_SUCCESS'; id: string; slotIdx?: number; payload: RouteResponse }
   | { type: 'IMPORT_GPX_REQUEST'; id: string; payload: ImportGpxRequest }
   | { type: 'IMPORT_GPX_SUCCESS'; id: string; payload: ImportGpxResponse }
+  | { type: 'MATCH_WAYPOINTS_REQUEST'; id: string; payload: ImportGpxRequest }
+  | { type: 'MATCH_WAYPOINTS_SUCCESS'; id: string; waypoints: LatLon[] | null; error?: string }
   | { type: 'INSPECT_POINT_REQUEST'; id: string; lon: number; lat: number; maxDistanceM?: number }
   | { type: 'INSPECT_POINT_SUCCESS'; id: string; payload: PointWayInfo | null }
+  | { type: 'ROBUSTNESS_PROBE_REQUEST'; id: string; payload: RobustnessProbeWorkerRequest }
+  | {
+      type: 'ROBUSTNESS_PROBE_RESULT';
+      id: string;
+      probeResult?: RobustnessProbeResult;
+    }
+  | { type: 'ROBUSTNESS_ERROR'; id: string; error: string }
   | { type: 'ROUTE_ERROR'; id: string; slotIdx?: number; error: string }
   | { type: 'STATUS'; message: string }
   | { type: 'CLEAR_GRAPH' }

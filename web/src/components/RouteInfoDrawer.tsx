@@ -31,6 +31,9 @@ import {
 } from './SurfaceBreakdown.tsx';
 import { InfoButton } from './TooltipPopover.tsx';
 import { Icon } from './common/Icon.tsx';
+import { RobustnessStrip } from './RobustnessStrip.tsx';
+import type { useRobustness } from '../hooks/useRobustness.ts';
+import type { AlternativeBranch } from '../utils/robustness.ts';
 
 const ALTERNATIVES = [
   { idx: 0, label: 'Primary', shortLabel: 'Route 1' },
@@ -55,6 +58,10 @@ interface RouteInfoDrawerProps {
   onHighlightSegment: (highlight: SegmentHighlight | null) => void;
   onFlyTo?: (lon: number, lat: number, minZoom?: number) => void;
   onRemoveWaypoint?: (index: number) => void;
+  robustness?: ReturnType<typeof useRobustness>;
+  onUseRobustnessBranch?: (branch: AlternativeBranch) => void;
+  onCompareRobustnessBranch?: (branch: AlternativeBranch) => void;
+  canAddCompareSlot?: boolean;
 }
 
 interface ParsedSlotData {
@@ -125,6 +132,10 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
   onHighlightSegment,
   onFlyTo,
   onRemoveWaypoint,
+  robustness,
+  onUseRobustnessBranch,
+  onCompareRobustnessBranch,
+  canAddCompareSlot = false,
 }) => {
   const [expandedSlotIdx, setExpandedSlotIdx] = useState<number | null>(() =>
     isCollapsed ? null : activeSlotIdx,
@@ -369,6 +380,47 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                   </button>
                 )}
 
+                {routeData && robustness && (
+                  <button
+                    id={slotIdx === 0 ? 'btn-robustness' : `btn-robustness-${slotIdx}`}
+                    type="button"
+                    className={`ri-robustness-btn ${
+                      slotIdx === activeSlotIdx && robustness.isOpen ? 'active' : ''
+                    }`}
+                    title="Check route stability and find alternatives across config perturbations"
+                    aria-expanded={slotIdx === activeSlotIdx && robustness.isOpen}
+                    onClick={() => {
+                      if (slotIdx !== activeSlotIdx) {
+                        onSelectActiveSlot?.(slotIdx);
+                        robustness.setIsOpen(true);
+                      } else {
+                        robustness.toggleOpen();
+                      }
+                    }}
+                  >
+                    {slotIdx === activeSlotIdx && robustness.phase === 'running' ? (
+                      <>
+                        <span className="status-spinner status-spinner-sm" aria-hidden="true" />
+                        <span>
+                          {robustness.completed}/{robustness.total}
+                        </span>
+                      </>
+                    ) : slotIdx === activeSlotIdx && robustness.analysis ? (
+                      <>
+                        <Icon name="compare" size={12} />
+                        <span>
+                          Robustness · {Math.round(robustness.analysis.overallStability * 100)}%
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Icon name="compare" size={12} />
+                        <span>Robustness</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
                 <div className="ri-alternatives" role="group" aria-label="Route alternatives">
                   {ALTERNATIVES.map((alt) => (
                     <button
@@ -523,6 +575,35 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                   </div>
                 </div>
               )}
+
+            {routeData && slotIdx === activeSlotIdx && robustness && robustness.isOpen && (
+              <RobustnessStrip
+                scenarioCount={robustness.scenarioCount}
+                onChangeScenarioCount={robustness.setScenarioCount}
+                phase={robustness.phase}
+                completed={robustness.completed}
+                total={robustness.total}
+                currentLabel={robustness.currentLabel}
+                workerStatus={robustness.workerStatus}
+                elapsedSec={robustness.elapsedSec}
+                error={robustness.error}
+                analysis={robustness.analysis}
+                showStabilityMap={robustness.showStabilityMap}
+                onToggleStabilityMap={robustness.setShowStabilityMap}
+                pinnedCorridorId={robustness.pinnedCorridorId}
+                onHoverCorridor={robustness.setHoveredCorridorId}
+                onTogglePinCorridor={(id) =>
+                  robustness.setPinnedCorridorId((prev) => (prev === id ? null : id))
+                }
+                onUseBranch={(b) => onUseRobustnessBranch?.(b)}
+                onCompareBranch={(b) => onCompareRobustnessBranch?.(b)}
+                canAddCompareSlot={canAddCompareSlot}
+                units={units}
+                onStart={robustness.start}
+                onCancel={robustness.cancel}
+                onClose={() => robustness.setIsOpen(false)}
+              />
+            )}
 
             {routeData && !barCollapsed && (
               <div

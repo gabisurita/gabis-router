@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useCallback, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import * as pmtiles from 'pmtiles';
@@ -56,10 +56,14 @@ import {
   syncRoutesLayers,
   syncHighlightLayer,
   syncLibraryLayers,
+  syncRobustnessLayers,
+  queryBranchMapLabels,
   fitRouteBounds,
   fitCoordinatesBounds,
   type SuggestionDimLevel,
 } from '../utils/map-layers.ts';
+import type { AlternativeBranch, RobustnessAnalysis } from '../utils/robustness.ts';
+import { BranchInspectorPopover } from './BranchInspectorPopover.tsx';
 import type {
   LibraryRoute,
   MapBoundsBox,
@@ -311,6 +315,16 @@ interface MapViewProps {
   onSelectLibraryRoute?: (routeId: number) => void;
   onHoverLibraryRoute?: (route: LibraryRoute | null) => void;
   onMapViewportChange?: (bounds: MapBoundsBox, center: { lat: number; lon: number }) => void;
+  isRobustnessOpen?: boolean;
+  robustnessAnalysis?: RobustnessAnalysis | null;
+  showStabilityMap?: boolean;
+  focusedRobustnessCorridorId?: string | null;
+  pinnedRobustnessCorridorId?: string | null;
+  canAddCompareSlot?: boolean;
+  onHoverRobustnessBranch?: (id: string | null) => void;
+  onTogglePinRobustnessBranch?: (id: string) => void;
+  onUseRobustnessBranch?: (branch: AlternativeBranch) => void;
+  onCompareRobustnessBranch?: (branch: AlternativeBranch) => void;
 }
 
 export const MapView: React.FC<MapViewProps> = ({
@@ -347,6 +361,16 @@ export const MapView: React.FC<MapViewProps> = ({
   onSelectLibraryRoute,
   onHoverLibraryRoute,
   onMapViewportChange,
+  isRobustnessOpen = false,
+  robustnessAnalysis = null,
+  showStabilityMap = true,
+  focusedRobustnessCorridorId = null,
+  pinnedRobustnessCorridorId = null,
+  canAddCompareSlot = false,
+  onHoverRobustnessBranch,
+  onTogglePinRobustnessBranch,
+  onUseRobustnessBranch,
+  onCompareRobustnessBranch,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -411,6 +435,22 @@ export const MapView: React.FC<MapViewProps> = ({
   onHoverLibraryRouteRef.current = onHoverLibraryRoute;
   const onMapViewportChangeRef = useRef(onMapViewportChange);
   onMapViewportChangeRef.current = onMapViewportChange;
+  const isRobustnessOpenRef = useRef(isRobustnessOpen);
+  isRobustnessOpenRef.current = isRobustnessOpen;
+  const robustnessAnalysisRef = useRef(robustnessAnalysis);
+  robustnessAnalysisRef.current = robustnessAnalysis;
+  const showStabilityMapRef = useRef(showStabilityMap);
+  showStabilityMapRef.current = showStabilityMap;
+  const focusedRobustnessCorridorIdRef = useRef(focusedRobustnessCorridorId);
+  focusedRobustnessCorridorIdRef.current = focusedRobustnessCorridorId;
+  const onHoverRobustnessBranchRef = useRef(onHoverRobustnessBranch);
+  onHoverRobustnessBranchRef.current = onHoverRobustnessBranch;
+  const onTogglePinRobustnessBranchRef = useRef(onTogglePinRobustnessBranch);
+  onTogglePinRobustnessBranchRef.current = onTogglePinRobustnessBranch;
+  const mapHoveredBranchIdRef = useRef<string | null>(null);
+
+  const [branchPopoverPos, setBranchPopoverPos] = useState<{ x: number; y: number } | null>(null);
+  const [branchMapLabels, setBranchMapLabels] = useState<string[]>([]);
 
   const pendingFitRouteRef = useRef<boolean>(false);
 
@@ -436,6 +476,13 @@ export const MapView: React.FC<MapViewProps> = ({
       suggestedLibraryTracksRef.current,
       activeLibraryPreviewRef.current ?? null,
       libraryDimLevelRef.current,
+    );
+    syncRobustnessLayers(
+      map,
+      isRobustnessOpenRef.current,
+      robustnessAnalysisRef.current ?? null,
+      showStabilityMapRef.current,
+      focusedRobustnessCorridorIdRef.current ?? null,
     );
   }, [segmentHighlight]);
 
@@ -747,6 +794,25 @@ export const MapView: React.FC<MapViewProps> = ({
         clearSingleClick();
         return;
       }
+      if (isRobustnessOpenRef.current) {
+        const robustLayers = ['robustness-focus-hit', 'robustness-corridors-hit'].filter((id) =>
+          Boolean(map.getLayer(id)),
+        );
+        if (robustLayers.length > 0) {
+          const hitBox: [[number, number], [number, number]] = [
+            [e.point.x - 6, e.point.y - 6],
+            [e.point.x + 6, e.point.y + 6],
+          ];
+          const hits = map.queryRenderedFeatures(hitBox, { layers: robustLayers });
+          const hitBranchId = hits[0]?.properties?.id ? String(hits[0].properties.id) : '';
+          if (hitBranchId) {
+            clearSingleClick();
+            hideMenu();
+            onTogglePinRobustnessBranchRef.current?.(hitBranchId);
+            return;
+          }
+        }
+      }
       if (isRouteLibraryOpenRef.current) {
         const queryLayers = ['library-preview-line', 'library-suggestions-hit'].filter((id) =>
           Boolean(map.getLayer(id)),
@@ -987,7 +1053,50 @@ export const MapView: React.FC<MapViewProps> = ({
       }
     });
 
+    const clearMapBranchHover = () => {
+      if (mapHoveredBranchIdRef.current !== null) {
+        mapHoveredBranchIdRef.current = null;
+        if (!insertDragRef.current?.hasDragged) {
+          map.getCanvas().style.cursor = '';
+        }
+        onHoverRobustnessBranchRef.current?.(null);
+      }
+    };
+
+    map.on('mousemove', (e) => {
+      if (
+        !isRobustnessOpenRef.current ||
+        draggingMarkerIndexRef.current !== null ||
+        insertDragRef.current?.hasDragged
+      ) {
+        clearMapBranchHover();
+        return;
+      }
+      const robustLayers = ['robustness-focus-hit', 'robustness-corridors-hit'].filter((id) =>
+        Boolean(map.getLayer(id)),
+      );
+      if (robustLayers.length === 0) {
+        clearMapBranchHover();
+        return;
+      }
+      const hitBox: [[number, number], [number, number]] = [
+        [e.point.x - 5, e.point.y - 5],
+        [e.point.x + 5, e.point.y + 5],
+      ];
+      const hits = map.queryRenderedFeatures(hitBox, { layers: robustLayers });
+      const hitBranchId = hits[0]?.properties?.id ? String(hits[0].properties.id) : null;
+      if (hitBranchId !== mapHoveredBranchIdRef.current) {
+        mapHoveredBranchIdRef.current = hitBranchId;
+        map.getCanvas().style.cursor = hitBranchId ? 'pointer' : '';
+        onHoverRobustnessBranchRef.current?.(hitBranchId);
+      }
+    });
+
+    const canvasEl = map.getCanvas();
+    canvasEl.addEventListener('mouseleave', clearMapBranchHover);
+
     return () => {
+      canvasEl.removeEventListener('mouseleave', clearMapBranchHover);
       window.removeEventListener('mouseup', finishInsert);
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
@@ -1106,6 +1215,17 @@ export const MapView: React.FC<MapViewProps> = ({
       libraryDimLevel,
     );
   }, [isRouteLibraryOpen, suggestedLibraryTracks, activeLibraryPreview, libraryDimLevel]);
+
+  useEffect(() => {
+    if (!mapRef.current || !styleReadyRef.current) return;
+    syncRobustnessLayers(
+      mapRef.current,
+      isRobustnessOpen,
+      robustnessAnalysis,
+      showStabilityMap,
+      focusedRobustnessCorridorId,
+    );
+  }, [isRobustnessOpen, robustnessAnalysis, showStabilityMap, focusedRobustnessCorridorId]);
 
   // Fit bounds to a library preview ONLY when explicitly requested via frameLibraryPreviewSeq
   useEffect(() => {
@@ -1466,6 +1586,76 @@ export const MapView: React.FC<MapViewProps> = ({
     }
   }, [hoverPosition]);
 
-  return <div id="map" ref={containerRef} />;
+  const focusedBranch = useMemo(() => {
+    if (!isRobustnessOpen || !robustnessAnalysis || !focusedRobustnessCorridorId) return null;
+    return robustnessAnalysis.branches.find((b) => b.id === focusedRobustnessCorridorId) ?? null;
+  }, [isRobustnessOpen, robustnessAnalysis, focusedRobustnessCorridorId]);
+
+  const isFocusedBranchPinned = Boolean(
+    focusedBranch && pinnedRobustnessCorridorId === focusedBranch.id,
+  );
+
+  // Project and anchor the floating branch inspector card cleanly inside the map viewport
+  useEffect(() => {
+    const map = mapRef.current;
+    const container = containerRef.current;
+    if (!map || !container || !focusedBranch) {
+      setBranchPopoverPos(null);
+      setBranchMapLabels([]);
+      return;
+    }
+
+    const updatePosition = () => {
+      const rect = container.getBoundingClientRect();
+      const pt = map.project(focusedBranch.midpoint);
+      const cardW = 316;
+      const cardH = isFocusedBranchPinned ? 270 : 225;
+      const margin = 14;
+      const topMin = 62;
+      const bottomMax = Math.max(topMin, rect.height - cardH - 140);
+
+      let x = rect.left + pt.x + 18;
+      if (x + cardW > rect.right - margin) {
+        x = rect.left + pt.x - cardW - 18;
+      }
+      x = Math.max(rect.left + margin, Math.min(rect.right - cardW - margin, x));
+      const y = Math.max(
+        rect.top + topMin,
+        Math.min(rect.top + bottomMax, rect.top + pt.y - 36),
+      );
+      setBranchPopoverPos({ x, y });
+    };
+
+    updatePosition();
+    if (styleReadyRef.current) {
+      setBranchMapLabels(queryBranchMapLabels(map, focusedBranch.coordinates));
+    } else {
+      setBranchMapLabels([]);
+    }
+
+    map.on('move', updatePosition);
+    return () => {
+      map.off('move', updatePosition);
+    };
+  }, [focusedBranch, isFocusedBranchPinned]);
+
+  return (
+    <>
+      <div id="map" ref={containerRef} />
+      {focusedBranch && branchPopoverPos && robustnessAnalysis && (
+        <BranchInspectorPopover
+          branch={focusedBranch}
+          completedCount={robustnessAnalysis.completedCount}
+          mapLabels={branchMapLabels}
+          screenPos={branchPopoverPos}
+          isPinned={isFocusedBranchPinned}
+          canAddCompareSlot={canAddCompareSlot}
+          onUseBranch={(b) => onUseRobustnessBranch?.(b)}
+          onCompareBranch={(b) => onCompareRobustnessBranch?.(b)}
+          onClose={() => onTogglePinRobustnessBranch?.(focusedBranch.id)}
+        />
+      )}
+    </>
+  );
 };
 

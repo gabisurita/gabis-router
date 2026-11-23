@@ -694,7 +694,7 @@ export const ProfileEditorPanel: React.FC<ProfileEditorPanelProps> = ({ routing,
                 label="Non-cycle-route road penalty"
                 value={axes.nonCycleRouteRoadPenalty}
                 min={0.0}
-                max={2.0}
+                max={5.0}
                 step={0.1}
                 formatValue={(v) => `+${Number(v.toFixed(1))}`}
                 tooltip="Additive penalty (+0.0 = no penalty) added per metre to motor roads that lack route=bicycle relations, cycleway=* lanes/tracks, or bicycle=designated access."

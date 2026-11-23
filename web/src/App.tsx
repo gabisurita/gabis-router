@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type maplibregl from 'maplibre-gl';
 import type { SegmentHighlight } from './utils/classification.ts';
-import { MAX_ROUTES } from './types.ts';
+import { MAX_ROUTES, MAX_ROUTE_SLOTS } from './types.ts';
 import type { SuggestionDimLevel } from './utils/map-layers.ts';
+import { TEMPLATE_PRESETS } from './utils/profile-editor.ts';
+import type { AlternativeBranch } from './utils/robustness.ts';
 import {
   decodePolyline5,
   fetchLibraryIndex,
@@ -41,6 +43,7 @@ import { RouteInfoDrawer } from './components/RouteInfoDrawer.tsx';
 import { SettingsSection } from './components/SettingsSection.tsx';
 import { AboutModal } from './components/AboutModal.tsx';
 import { useRouting } from './hooks/useRouting.ts';
+import { useRobustness } from './hooks/useRobustness.ts';
 import { useOffline } from './hooks/useOffline.ts';
 import { useSettings } from './hooks/useSettings.ts';
 import { useMcpBridge } from './mcp-bridge.ts';
@@ -62,6 +65,56 @@ export const App: React.FC = () => {
   );
 
   const routing = useRouting(offline.isOfflineMode);
+
+  const robustness = useRobustness({
+    activeSlot: routing.slots[routing.activeSlotIdx],
+    activeSlotIdx: routing.activeSlotIdx,
+    isOfflineMode: offline.isOfflineMode,
+    customProfiles: routing.customProfiles,
+    draftProfile: routing.draftProfile,
+    getProfileMeta: routing.getProfileMeta,
+  });
+
+  const activeRouteSlotCount = useMemo(
+    () =>
+      routing.slots.filter((s) => (s.routeIdx ?? 0) === routing.activeRouteIdx).length,
+    [routing.slots, routing.activeRouteIdx],
+  );
+
+  const handleCompareRobustnessBranch = useCallback(
+    (branch: AlternativeBranch) => {
+      const baseMeta = routing.getProfileMeta(routing.profile);
+      const baseLabel = baseMeta.shortLabel || baseMeta.label || routing.profile;
+      const slug = `${routing.profile}-${branch.id}`
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      const customId = `custom:robust-${slug}`;
+      const tpl = branch.baseTemplate || 'gabis-fast-city';
+      routing.saveCustomProfile(
+        {
+          id: customId,
+          name: `${baseLabel} · ${branch.label}`,
+          summary: branch.description,
+          baseTemplate: tpl,
+          mode: branch.axes ? 'detailed' : 'dsl',
+          axes: branch.axes || { ...TEMPLATE_PRESETS[tpl].axes },
+          dsl: branch.fullDsl,
+          updatedAt: Date.now(),
+        },
+        false,
+      );
+      routing.addProfileSlot(customId);
+    },
+    [routing],
+  );
+
+  const handleUseRobustnessBranch = useCallback(
+    (branch: AlternativeBranch) => {
+      void routing.applyBranchCoordinates(branch.coordinates, branch.midpoint);
+    },
+    [routing],
+  );
 
   // Responsive drawer states
   const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 860px)').matches;
@@ -858,6 +911,10 @@ export const App: React.FC = () => {
         onHighlightSegment={setSegmentHighlight}
         onFlyTo={handleFlyTo}
         onRemoveWaypoint={routing.removeWaypoint}
+        robustness={robustness}
+        onUseRobustnessBranch={handleUseRobustnessBranch}
+        onCompareRobustnessBranch={handleCompareRobustnessBranch}
+        canAddCompareSlot={activeRouteSlotCount < MAX_ROUTE_SLOTS}
       />
 
       <MapView
@@ -894,6 +951,18 @@ export const App: React.FC = () => {
         onSelectLibraryRoute={handleSelectLibraryRouteById}
         onHoverLibraryRoute={setHoveredLibraryRoute}
         onMapViewportChange={handleMapViewportChange}
+        isRobustnessOpen={robustness.isOpen}
+        robustnessAnalysis={robustness.analysis}
+        showStabilityMap={robustness.showStabilityMap}
+        focusedRobustnessCorridorId={robustness.focusedCorridorId}
+        pinnedRobustnessCorridorId={robustness.pinnedCorridorId}
+        canAddCompareSlot={activeRouteSlotCount < MAX_ROUTE_SLOTS}
+        onHoverRobustnessBranch={robustness.setHoveredCorridorId}
+        onTogglePinRobustnessBranch={(id) =>
+          robustness.setPinnedCorridorId((prev) => (prev === id ? null : id))
+        }
+        onUseRobustnessBranch={handleUseRobustnessBranch}
+        onCompareRobustnessBranch={handleCompareRobustnessBranch}
       />
 
       <SettingsSection

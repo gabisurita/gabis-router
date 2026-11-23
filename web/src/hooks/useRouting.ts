@@ -38,7 +38,7 @@ export const DEFAULT_AVOID_RADIUS_M = 50;
 let cachedWasmModule: WebAssembly.Module | undefined;
 let wasmModulePromise: Promise<WebAssembly.Module | undefined> | null = null;
 
-function getSharedWasmModule(): Promise<WebAssembly.Module | undefined> {
+export function getSharedWasmModule(): Promise<WebAssembly.Module | undefined> {
   if (cachedWasmModule) {
     return Promise.resolve(cachedWasmModule);
   }
@@ -417,6 +417,9 @@ export function useRouting(isOfflineMode: boolean) {
   const pendingInspectCallbacksRef = useRef<Map<string, (info: PointWayInfo | null) => void>>(
     new Map(),
   );
+  const pendingMatchCallbacksRef = useRef<
+    Map<string, (res: { waypoints: LatLon[] | null; error?: string }) => void>
+  >(new Map());
   const initCompletedRef = useRef<boolean>(false);
   const routeCounterRef = useRef<number>(0);
   const requestedSlotAltRef = useRef<number[]>([0]);
@@ -706,6 +709,14 @@ export function useRouting(isOfflineMode: boolean) {
           }
           break;
         }
+        case 'MATCH_WAYPOINTS_SUCCESS': {
+          const cb = pendingMatchCallbacksRef.current.get(msg.id);
+          if (cb) {
+            pendingMatchCallbacksRef.current.delete(msg.id);
+            cb({ waypoints: msg.waypoints, error: msg.error });
+          }
+          break;
+        }
         case 'ROUTE_SUCCESS': {
           const slotIdx = activeSlotRouteIdRef.current.indexOf(msg.id);
           if (slotIdx === -1) break;
@@ -941,6 +952,12 @@ export function useRouting(isOfflineMode: boolean) {
           resolve(null);
         }
         pendingInspectCallbacksRef.current.clear();
+      }
+      if (pendingMatchCallbacksRef.current.size > 0) {
+        for (const resolve of pendingMatchCallbacksRef.current.values()) {
+          resolve({ waypoints: null });
+        }
+        pendingMatchCallbacksRef.current.clear();
       }
 
       const nextSlots = slotsRef.current.map((s) =>
@@ -1855,6 +1872,116 @@ export function useRouting(isOfflineMode: boolean) {
     [],
   );
 
+  const applyBranchCoordinates = useCallback(
+    async (
+      branchCoords: [number, number][],
+      fallbackMidpoint?: [number, number],
+    ): Promise<void> => {
+      if (!workerRef.current || branchCoords.length < 2) return;
+      const slotIdx = activeSlotIdxRef.current;
+      const activeSlot = slotsRef.current[slotIdx];
+      if (!activeSlot || activeSlot.waypoints.length < 2 || !activeSlot.route) return;
+
+      const wps = activeSlot.waypoints;
+      const targetRouteIdx = activeSlot.routeIdx ?? 0;
+      const feat = activeSlot.route.features[0];
+      const rawCoords = (feat?.geometry as GeoJSON.LineString | undefined)?.coordinates;
+      if (!rawCoords || rawCoords.length < 2) return;
+
+      const baseCoords: [number, number][] = rawCoords.map((c) => [c[0], c[1]]);
+      const nearIdx = (target: [number, number], start = 0): number => {
+        const cosLat = Math.cos((target[1] * Math.PI) / 180);
+        let best = start;
+        let bestD2 = Number.POSITIVE_INFINITY;
+        for (let i = start; i < baseCoords.length; i++) {
+          const dx = (baseCoords[i][0] - target[0]) * cosLat;
+          const dy = baseCoords[i][1] - target[1];
+          const d2 = dx * dx + dy * dy;
+          if (d2 < bestD2) {
+            bestD2 = d2;
+            best = i;
+          }
+        }
+        return best;
+      };
+
+      const baseStartIdx = nearIdx(branchCoords[0], 0);
+      const baseEndIdx = Math.max(baseStartIdx, nearIdx(branchCoords[branchCoords.length - 1], baseStartIdx));
+
+      // Project existing waypoints monotonically along the base route
+      const wpBaseIdx: number[] = new Array(wps.length);
+      wpBaseIdx[0] = 0;
+      wpBaseIdx[wps.length - 1] = baseCoords.length - 1;
+      for (let w = 1; w < wps.length - 1; w++) {
+        wpBaseIdx[w] = nearIdx([wps[w].lon, wps[w].lat], wpBaseIdx[w - 1]);
+      }
+
+      let beforeWpIdx = 0;
+      for (let w = 0; w < wps.length - 1; w++) {
+        if (wpBaseIdx[w] <= baseStartIdx) beforeWpIdx = w;
+      }
+      let afterWpIdx = wps.length - 1;
+      for (let w = beforeWpIdx + 1; w < wps.length; w++) {
+        if (wpBaseIdx[w] >= baseEndIdx) {
+          afterWpIdx = w;
+          break;
+        }
+      }
+
+      const splicedCoords: [number, number][] = [
+        ...baseCoords.slice(wpBaseIdx[beforeWpIdx], baseStartIdx),
+        ...branchCoords,
+        ...baseCoords.slice(baseEndIdx + 1, wpBaseIdx[afterWpIdx] + 1),
+      ];
+      if (splicedCoords.length < 2) return;
+
+      const gpxXml = `<gpx><trk><trkseg>${splicedCoords
+        .map(([lon, lat]) => `<trkpt lat="${lat}" lon="${lon}"/>`)
+        .join('')}</trkseg></trk></gpx>`;
+      const wpsSigBefore = wps.map((w) => `${w.lat.toFixed(5)},${w.lon.toFixed(5)}`).join('|');
+
+      setStatus('Fitting minimal waypoints along branch...');
+      const id = `match-branch-${++routeCounterRef.current}`;
+      const matchRes = await new Promise<{ waypoints: LatLon[] | null; error?: string }>((resolve) => {
+        pendingMatchCallbacksRef.current.set(id, resolve);
+        workerRef.current?.postMessage({
+          type: 'MATCH_WAYPOINTS_REQUEST',
+          id,
+          payload: {
+            gpxXml,
+            profile: activeSlot.profile,
+            toleranceM: 35,
+          },
+        } satisfies WorkerMessage);
+      });
+
+      const currentSlot = slotsRef.current[activeSlotIdxRef.current];
+      const currentSig = (currentSlot?.waypoints || [])
+        .map((w) => `${w.lat.toFixed(5)},${w.lon.toFixed(5)}`)
+        .join('|');
+      if (currentSig !== wpsSigBefore) return;
+
+      const interiorVias: LatLon[] =
+        matchRes.waypoints && matchRes.waypoints.length >= 3
+          ? matchRes.waypoints.slice(1, -1)
+          : fallbackMidpoint
+            ? [{ lat: fallbackMidpoint[1], lon: fallbackMidpoint[0] }]
+            : [];
+      if (interiorVias.length === 0) {
+        setStatus('');
+        return;
+      }
+
+      const nextWaypoints = [
+        ...wps.slice(0, beforeWpIdx + 1),
+        ...interiorVias,
+        ...wps.slice(afterWpIdx),
+      ];
+      updateRouteWaypoints(targetRouteIdx, nextWaypoints, true);
+    },
+    [updateRouteWaypoints],
+  );
+
   const importGpxContent = useCallback((gpxXml: string, toleranceM = 20, targetSlotIdx?: number) => {
     if (!workerRef.current) return;
     const slotIdx =
@@ -1949,15 +2076,14 @@ export function useRouting(isOfflineMode: boolean) {
 
   const saveCustomProfile = useCallback(
     (record: CustomProfileRecord, recompute = true) => {
-      setCustomProfiles((prev) => {
-        const exists = prev.some((c) => c.id === record.id);
-        const next = exists
-          ? prev.map((c) => (c.id === record.id ? record : c))
-          : [...prev, record];
-        customProfilesRef.current = next;
-        saveCustomProfilesToStorage(next);
-        return next;
-      });
+      const prev = customProfilesRef.current;
+      const exists = prev.some((c) => c.id === record.id);
+      const next = exists
+        ? prev.map((c) => (c.id === record.id ? record : c))
+        : [...prev, record];
+      customProfilesRef.current = next;
+      saveCustomProfilesToStorage(next);
+      setCustomProfiles(next);
       draftProfileRef.current = record;
       setDraftProfileState(record);
       updateCustomProfileDsl(record.id, record.dsl, recompute);
@@ -2219,6 +2345,7 @@ export function useRouting(isOfflineMode: boolean) {
     fitBoundsSeq,
     triggerFitBounds,
     inspectPoint,
+    applyBranchCoordinates,
     importGpxContent,
     importGpxFile,
     loadSavedRoute,

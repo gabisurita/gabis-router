@@ -9,6 +9,7 @@ import {
 import type { SegmentHighlight } from './classification.ts';
 import { createCirclePolygon } from './geo.ts';
 import type { PreviewLibraryRoute, SuggestedLibraryTrack } from './route-library.ts';
+import type { RobustnessAnalysis } from './robustness.ts';
 
 const ROUTE_HIT_PX = 8;
 
@@ -226,7 +227,16 @@ function ensureRouteLayerOrder(
   const slotOrder: number[] = [...inactiveRouteSlots, ...activeRouteSlots, activeSlotIdx];
 
   const orderedIds = [
+    'robustness-corridors-halo',
+    'robustness-corridors-casing',
+    'robustness-corridors-line',
     ...slotOrder.flatMap((idx) => slotLayerIds(idx)),
+    'robustness-stability-halo',
+    'robustness-stability-casing',
+    'robustness-stability-line',
+    'robustness-focus-halo',
+    'robustness-focus-casing',
+    'robustness-focus-line',
     'route-hit',
     'route-segment-halo',
     'route-segment-line',
@@ -678,4 +688,412 @@ export function syncLibraryLayers(
       },
     });
   }
+}
+
+export function syncRobustnessLayers(
+  map: maplibregl.Map,
+  isOpen: boolean,
+  analysis: RobustnessAnalysis | null,
+  showStabilityMap: boolean,
+  focusedBranchId: string | null,
+) {
+  const beforeId = getFirstLabelLayerId(map);
+  const active = isOpen && Boolean(analysis);
+
+  const branchFeatures: GeoJSON.Feature[] = [];
+  let focusData: GeoJSON.FeatureCollection = EMPTY_FC;
+  let focusEndpointsData: GeoJSON.FeatureCollection = EMPTY_FC;
+  let replacedBaseData: GeoJSON.FeatureCollection = EMPTY_FC;
+  const hasFocus = active && Boolean(focusedBranchId);
+
+  if (active && analysis) {
+    const items = analysis.branches;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const b = items[i];
+      if (b.coordinates.length < 2) continue;
+      if (b.id === focusedBranchId) {
+        focusData = {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: {
+                id: b.id,
+                lineColor: b.color.line,
+                casingColor: b.color.casing,
+              },
+              geometry: {
+                type: 'LineString',
+                coordinates: b.coordinates,
+              },
+            },
+          ],
+        };
+        const first = b.coordinates[0];
+        const last = b.coordinates[b.coordinates.length - 1];
+        focusEndpointsData = {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: { role: 'split', lineColor: b.color.line, casingColor: b.color.casing },
+              geometry: { type: 'Point', coordinates: first },
+            },
+            {
+              type: 'Feature',
+              properties: { role: 'rejoin', lineColor: b.color.line, casingColor: b.color.casing },
+              geometry: { type: 'Point', coordinates: last },
+            },
+          ],
+        };
+        if (b.replacedBaseCoords.length >= 2) {
+          replacedBaseData = {
+            type: 'FeatureCollection',
+            features: [
+              {
+                type: 'Feature',
+                properties: { id: b.id },
+                geometry: {
+                  type: 'LineString',
+                  coordinates: b.replacedBaseCoords,
+                },
+              },
+            ],
+          };
+        }
+        continue;
+      }
+      branchFeatures.push({
+        type: 'Feature',
+        properties: {
+          id: b.id,
+          lineColor: b.color.line,
+          casingColor: b.color.casing,
+          dimmed: hasFocus ? 1 : 0,
+        },
+        geometry: {
+          type: 'LineString',
+          coordinates: b.coordinates,
+        },
+      });
+    }
+  }
+
+  const corridorsData: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: branchFeatures,
+  };
+
+  const stabilityData: GeoJSON.FeatureCollection =
+    active && analysis && showStabilityMap && analysis.segments.length > 0
+      ? {
+          type: 'FeatureCollection',
+          features: analysis.segments.map((seg, idx) => ({
+            type: 'Feature',
+            properties: {
+              idx,
+              color: seg.color,
+              band: seg.band,
+              dimmed: hasFocus ? 1 : 0,
+            },
+            geometry: {
+              type: 'LineString',
+              coordinates: seg.coordinates,
+            },
+          })),
+        }
+      : EMPTY_FC;
+
+  const firstRouteLayer = map.getLayer('route-halo') ? 'route-halo' : beforeId;
+
+  const corrSrc = map.getSource('robustness-corridors') as maplibregl.GeoJSONSource | undefined;
+  if (corrSrc) {
+    corrSrc.setData(corridorsData);
+  } else if (active) {
+    map.addSource('robustness-corridors', { type: 'geojson', data: corridorsData });
+    map.addLayer(
+      {
+        id: 'robustness-corridors-halo',
+        type: 'line',
+        source: 'robustness-corridors',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 6.2, 12, 7.6, 16, 9.2],
+          'line-opacity': ['match', ['get', 'dimmed'], 1, 0.14, 0.85],
+        },
+      },
+      firstRouteLayer,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-corridors-casing',
+        type: 'line',
+        source: 'robustness-corridors',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'casingColor'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 4.4, 12, 5.6, 16, 7.0],
+          'line-opacity': ['match', ['get', 'dimmed'], 1, 0.18, 0.92],
+        },
+      },
+      firstRouteLayer,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-corridors-line',
+        type: 'line',
+        source: 'robustness-corridors',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'lineColor'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 3.0, 12, 4.0, 16, 5.0],
+          'line-opacity': ['match', ['get', 'dimmed'], 1, 0.22, 0.96],
+        },
+      },
+      firstRouteLayer,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-corridors-hit',
+        type: 'line',
+        source: 'robustness-corridors',
+        paint: {
+          'line-color': '#000000',
+          'line-width': 18,
+          'line-opacity': 0,
+        },
+      },
+      beforeId,
+    );
+  }
+
+  const stabSrc = map.getSource('robustness-stability') as maplibregl.GeoJSONSource | undefined;
+  if (stabSrc) {
+    stabSrc.setData(stabilityData);
+  } else if (active) {
+    map.addSource('robustness-stability', { type: 'geojson', data: stabilityData });
+    map.addLayer(
+      {
+        id: 'robustness-stability-halo',
+        type: 'line',
+        source: 'robustness-stability',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 5.6, 12, 6.8, 16, 8.4],
+          'line-opacity': ['match', ['get', 'dimmed'], 1, 0.16, 0.72],
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-stability-casing',
+        type: 'line',
+        source: 'robustness-stability',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#0f172a',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 4.2, 12, 5.2, 16, 6.6],
+          'line-opacity': ['match', ['get', 'dimmed'], 1, 0.22, 0.85],
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-stability-line',
+        type: 'line',
+        source: 'robustness-stability',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'color'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 2.8, 12, 3.6, 16, 4.8],
+          'line-opacity': ['match', ['get', 'dimmed'], 1, 0.28, 1.0],
+        },
+      },
+      beforeId,
+    );
+  }
+
+  const replSrc = map.getSource('robustness-replaced') as maplibregl.GeoJSONSource | undefined;
+  if (replSrc) {
+    replSrc.setData(replacedBaseData);
+  } else if (active) {
+    map.addSource('robustness-replaced', { type: 'geojson', data: replacedBaseData });
+    map.addLayer(
+      {
+        id: 'robustness-replaced-casing',
+        type: 'line',
+        source: 'robustness-replaced',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#1e293b',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 5.2, 12, 6.4, 16, 7.8],
+          'line-opacity': 0.5,
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-replaced-line',
+        type: 'line',
+        source: 'robustness-replaced',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#f87171',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 3.0, 12, 3.8, 16, 4.8],
+          'line-opacity': 0.65,
+        },
+      },
+      beforeId,
+    );
+  }
+
+  const focusSrc = map.getSource('robustness-focus') as maplibregl.GeoJSONSource | undefined;
+  if (focusSrc) {
+    focusSrc.setData(focusData);
+  } else if (active) {
+    map.addSource('robustness-focus', { type: 'geojson', data: focusData });
+    map.addLayer(
+      {
+        id: 'robustness-focus-halo',
+        type: 'line',
+        source: 'robustness-focus',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 8.4, 12, 10.4, 16, 12.4],
+          'line-opacity': 0.96,
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-focus-casing',
+        type: 'line',
+        source: 'robustness-focus',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'casingColor'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 6.0, 12, 7.6, 16, 9.2],
+          'line-opacity': 0.98,
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-focus-line',
+        type: 'line',
+        source: 'robustness-focus',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'lineColor'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 4.2, 12, 5.4, 16, 6.6],
+          'line-opacity': 1,
+        },
+      },
+      beforeId,
+    );
+    map.addLayer(
+      {
+        id: 'robustness-focus-hit',
+        type: 'line',
+        source: 'robustness-focus',
+        paint: {
+          'line-color': '#000000',
+          'line-width': 20,
+          'line-opacity': 0,
+        },
+      },
+      beforeId,
+    );
+  }
+
+  const epSrc = map.getSource('robustness-focus-endpoints') as maplibregl.GeoJSONSource | undefined;
+  if (epSrc) {
+    epSrc.setData(focusEndpointsData);
+  } else if (active) {
+    map.addSource('robustness-focus-endpoints', { type: 'geojson', data: focusEndpointsData });
+    map.addLayer({
+      id: 'robustness-focus-endpoints-circle',
+      type: 'circle',
+      source: 'robustness-focus-endpoints',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 4.5, 13, 6.5, 16, 8],
+        'circle-color': ['get', 'lineColor'],
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 2.5,
+      },
+    });
+  }
+}
+
+/**
+ * Reads road, park, and cycle-route names already rendered on the MapLibre canvas along a branch.
+ * Requires zero network requests and gracefully returns an empty array when zoomed out.
+ */
+export function queryBranchMapLabels(
+  map: maplibregl.Map,
+  coordinates: [number, number][],
+): string[] {
+  if (coordinates.length < 2) return [];
+  const canvas = map.getCanvas();
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w <= 0 || h <= 0) return [];
+
+  const cycleRefs: string[] = [];
+  const placeNames: string[] = [];
+  const roadNames: string[] = [];
+  const seen = new Set<string>();
+
+  const pushUnique = (target: string[], raw: unknown) => {
+    if (typeof raw !== 'string') return;
+    const s = raw.trim();
+    if (!s || s.length > 42) return;
+    const key = s.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    target.push(s);
+  };
+
+  const fracs = [0.22, 0.38, 0.5, 0.62, 0.78];
+  for (const f of fracs) {
+    const idx = Math.min(coordinates.length - 1, Math.max(0, Math.floor((coordinates.length - 1) * f)));
+    const pt = map.project(coordinates[idx]);
+    if (pt.x < 0 || pt.y < 0 || pt.x > w || pt.y > h) continue;
+    const box: [[number, number], [number, number]] = [
+      [Math.max(0, pt.x - 10), Math.max(0, pt.y - 10)],
+      [Math.min(w, pt.x + 10), Math.min(h, pt.y + 10)],
+    ];
+    const feats = map.queryRenderedFeatures(box);
+    for (const feat of feats) {
+      const layerId = feat.layer?.id || '';
+      if (layerId.startsWith('robustness-') || layerId.startsWith('route')) continue;
+      const props = (feat.properties || {}) as Record<string, unknown>;
+      const srcLayer = String((feat as unknown as { sourceLayer?: string }).sourceLayer || '').toLowerCase();
+      if (layerId.includes('cycle') || srcLayer.includes('cycle')) {
+        pushUnique(cycleRefs, props.ref || props.name);
+      } else if (
+        srcLayer.includes('park') ||
+        srcLayer.includes('landuse') ||
+        srcLayer.includes('landcover') ||
+        srcLayer.includes('poi')
+      ) {
+        const cls = String(props.class || '').toLowerCase();
+        if (['park', 'wood', 'forest', 'common', 'heath', 'nature_reserve', 'garden', 'recreation_ground'].includes(cls)) {
+          pushUnique(placeNames, props['name:en'] || props.name);
+        }
+      } else if (srcLayer.includes('transport') || layerId.includes('road') || layerId.includes('path')) {
+        pushUnique(roadNames, props['name:en'] || props.name || props.ref);
+      }
+    }
+  }
+
+  return [...cycleRefs.slice(0, 2), ...placeNames.slice(0, 2), ...roadNames.slice(0, 2)].slice(0, 3);
 }

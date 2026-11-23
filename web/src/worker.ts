@@ -47,6 +47,8 @@ let isOfflineMode = false;
 const latestSlotRouteIds = new Map<number, string>();
 let latestImportId: string | null = null;
 let latestInspectId: string | null = null;
+let latestMatchWaypointsId: string | null = null;
+let latestRobustnessId: string | null = null;
 const loadedBuiltInProfiles = new Set<string>();
 const customProfileContents = new Map<string, string>();
 const customProfileErrors = new Map<string, string>();
@@ -594,6 +596,48 @@ async function handleMessage(msg: WorkerMessage, customSeq?: number): Promise<vo
       break;
     }
 
+    case 'MATCH_WAYPOINTS_REQUEST': {
+      const isCancelled = () => msg.id !== latestMatchWaypointsId;
+      if (isCancelled()) return;
+      try {
+        const { gpxXml, profile, toleranceM } = msg.payload;
+        const trackPoints = extractGpxTrackPoints(gpxXml);
+        if (trackPoints.length < 2) {
+          postMessage({
+            type: 'MATCH_WAYPOINTS_SUCCESS',
+            id: msg.id,
+            waypoints: null,
+            error: 'Branch has fewer than 2 coordinates.',
+          } satisfies WorkerMessage);
+          break;
+        }
+        const rawJson = await runWithLazySegments(
+          trackPoints,
+          profile,
+          (r) => r.match_gpx_waypoints(gpxXml, profile, toleranceM ?? 35.0),
+          isCancelled,
+        );
+        if (isCancelled()) return;
+        const parsed = JSON.parse(rawJson) as { waypoints: LatLon[] };
+        postMessage({
+          type: 'MATCH_WAYPOINTS_SUCCESS',
+          id: msg.id,
+          waypoints: parsed.waypoints,
+        } satisfies WorkerMessage);
+      } catch (err) {
+        if (isCancelled() || String(err).includes(CANCELLED_ERR)) return;
+        postMessage({
+          type: 'MATCH_WAYPOINTS_SUCCESS',
+          id: msg.id,
+          waypoints: null,
+          error: String(err),
+        } satisfies WorkerMessage);
+      } finally {
+        setWorkerPhase('idle');
+      }
+      break;
+    }
+
     case 'INSPECT_POINT_REQUEST': {
       if (msg.id !== latestInspectId) return;
       try {
@@ -622,6 +666,115 @@ async function handleMessage(msg: WorkerMessage, customSeq?: number): Promise<vo
           id: msg.id,
           payload: null,
         } satisfies WorkerMessage);
+      }
+      break;
+    }
+
+    case 'ROBUSTNESS_PROBE_REQUEST': {
+      const isCancelled = () => msg.id !== latestRobustnessId;
+      if (isCancelled()) return;
+      const probeProfileKey = 'custom:__robust_probe__';
+      try {
+        const { waypoints, nogos, probe } = msg.payload;
+        const waypointsStr = waypoints.map((w) => `${w.lon},${w.lat}`).join('|');
+        const nogosStr =
+          nogos && nogos.length > 0
+            ? nogos
+                .map(
+                  (n) =>
+                    `${n.lon},${n.lat},${n.radius}${n.weight !== undefined ? ',' + n.weight : ''}`,
+                )
+                .join('|')
+            : undefined;
+
+        customProfileContents.set(probeProfileKey, probe.screeningDsl);
+        customProfileErrors.delete(probeProfileKey);
+        const rInit = await ensureRouter();
+        rInit.load_profile(probeProfileKey, probe.screeningDsl);
+
+        let probeRoute: RouteResponse | undefined;
+        try {
+          const geojsonStr = await runWithLazySegments(
+            waypoints,
+            probeProfileKey,
+            (r) => r.route(waypointsStr, probeProfileKey, 0, nogosStr),
+            isCancelled,
+          );
+          if (isCancelled()) return;
+          const rawProbeRoute = JSON.parse(geojsonStr) as RouteResponse;
+          const feat = rawProbeRoute.features[0];
+          if (feat) {
+            const p = feat.properties;
+            probeRoute = {
+              type: 'FeatureCollection',
+              features: [
+                {
+                  type: 'Feature',
+                  properties: {
+                    'track-length': p['track-length'],
+                    'total-time': p['total-time'],
+                    cost: p.cost,
+                    'filtered ascend': p['filtered ascend'],
+                    ...(Array.isArray((p as Record<string, unknown>).segments)
+                      ? { segments: (p as Record<string, unknown>).segments }
+                      : {}),
+                  } as RouteResponse['features'][0]['properties'],
+                  geometry: {
+                    type: 'LineString',
+                    coordinates: feat.geometry.coordinates,
+                  },
+                },
+              ],
+            };
+          }
+        } catch (probeErr) {
+          if (isCancelled() || String(probeErr).includes(CANCELLED_ERR)) return;
+          const errStr = String(probeErr);
+          if (
+            errStr.includes('No path found') ||
+            errStr.includes('could not be mapped') ||
+            errStr.includes('exceeded maximum node limit')
+          ) {
+            probeRoute = undefined;
+          } else {
+            throw probeErr;
+          }
+        }
+
+        if (isCancelled()) return;
+        postMessage({
+          type: 'ROBUSTNESS_PROBE_RESULT',
+          id: msg.id,
+          probeResult: probeRoute
+            ? {
+                id: probe.id,
+                kind: probe.kind,
+                label: probe.label,
+                dimension: probe.dimension,
+                description: probe.description,
+                fullDsl: probe.fullDsl,
+                axes: probe.axes,
+                baseTemplate: probe.baseTemplate,
+                route: probeRoute,
+              }
+            : undefined,
+        } satisfies WorkerMessage);
+      } catch (err) {
+        if (isCancelled() || String(err).includes(CANCELLED_ERR)) return;
+        postMessage({
+          type: 'ROBUSTNESS_ERROR',
+          id: msg.id,
+          error: String(err),
+        } satisfies WorkerMessage);
+      } finally {
+        customProfileContents.delete(probeProfileKey);
+        customProfileErrors.delete(probeProfileKey);
+        try {
+          router?.remove_profile(probeProfileKey);
+        } catch {
+          // ignore if router was reset
+        }
+        setWorkerPhase('idle');
       }
       break;
     }
@@ -672,6 +825,10 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
     latestSlotRouteIds.clear();
   } else if (msg.type === 'INSPECT_POINT_REQUEST') {
     latestInspectId = msg.id;
+  } else if (msg.type === 'MATCH_WAYPOINTS_REQUEST') {
+    latestMatchWaypointsId = msg.id;
+  } else if (msg.type === 'ROBUSTNESS_PROBE_REQUEST') {
+    latestRobustnessId = msg.id;
   }
   queue = queue
     .then(() => handleMessage(msg, customSeq))
