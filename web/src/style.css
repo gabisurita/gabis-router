@@ -5906,15 +5906,19 @@ button.rl-stop-pill.is-clickable:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px 14px;
-  flex-wrap: wrap;
+  gap: 6px 10px;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .ri-robust-summary-metrics {
   display: flex;
   align-items: center;
-  gap: 8px 12px;
-  flex-wrap: wrap;
+  gap: 6px 10px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
   font-size: 0.72rem;
   color: var(--muted);
 }
@@ -5930,6 +5934,13 @@ button.rl-stop-pill.is-clickable:hover {
   color: var(--text);
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ri-robust-stat-inline {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ri-robust-stat-inline strong {
@@ -5940,12 +5951,28 @@ button.rl-stop-pill.is-clickable:hover {
 .ri-robust-axes-inline {
   font-size: 0.7rem;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .ri-robust-summary-controls {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .ri-robust-summary-bar {
+    flex-wrap: wrap;
+  }
+  .ri-robust-summary-controls {
+    flex-wrap: wrap;
+  }
 }
 
 .ri-stability-map-chip {
@@ -6034,6 +6061,8 @@ button.rl-stop-pill.is-clickable:hover {
   padding: 1px 5px;
   border-radius: 4px;
   background: rgba(148, 163, 184, 0.14);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ri-corridor-deltas {

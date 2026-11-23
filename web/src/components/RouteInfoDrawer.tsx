@@ -33,14 +33,7 @@ import { InfoButton } from './TooltipPopover.tsx';
 import { Icon } from './common/Icon.tsx';
 import { RobustnessStrip } from './RobustnessStrip.tsx';
 import type { useRobustness } from '../hooks/useRobustness.ts';
-import type { AlternativeBranch } from '../utils/robustness.ts';
-
-const ALTERNATIVES = [
-  { idx: 0, label: 'Primary', shortLabel: 'Route 1' },
-  { idx: 1, label: 'Alt 2', shortLabel: 'Alt 2' },
-  { idx: 2, label: 'Alt 3', shortLabel: 'Alt 3' },
-  { idx: 3, label: 'Alt 4', shortLabel: 'Alt 4' },
-];
+import type { AlternativeBranch, AlternativeCorridor } from '../utils/robustness.ts';
 
 interface RouteInfoDrawerProps {
   slots: RouteSlotState[];
@@ -49,7 +42,6 @@ interface RouteInfoDrawerProps {
   getProfileMeta?: (profileId: ProfileName) => ProfileMeta;
   statusMessage?: string;
   units: Units;
-  onSelectSlotAlternative: (slotIdx: number, altIdx: number) => void;
   onRemoveSlot?: (slotIdx: number) => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
@@ -57,10 +49,13 @@ interface RouteInfoDrawerProps {
   onHoverPosition: (pos: { lon: number; lat: number } | null) => void;
   onHighlightSegment: (highlight: SegmentHighlight | null) => void;
   onFlyTo?: (lon: number, lat: number, minZoom?: number) => void;
+  onFocusRobustnessCoords?: (coords: [number, number][]) => void;
   onRemoveWaypoint?: (index: number) => void;
   robustness?: ReturnType<typeof useRobustness>;
   onUseRobustnessBranch?: (branch: AlternativeBranch) => void;
   onCompareRobustnessBranch?: (branch: AlternativeBranch) => void;
+  onUseRobustnessVariant?: (corridor: AlternativeCorridor) => void;
+  onCompareRobustnessVariant?: (corridor: AlternativeCorridor) => void;
   canAddCompareSlot?: boolean;
 }
 
@@ -123,7 +118,6 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
   getProfileMeta,
   statusMessage,
   units,
-  onSelectSlotAlternative,
   onRemoveSlot,
   isCollapsed,
   onToggleCollapse,
@@ -131,10 +125,13 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
   onHoverPosition,
   onHighlightSegment,
   onFlyTo,
+  onFocusRobustnessCoords,
   onRemoveWaypoint,
   robustness,
   onUseRobustnessBranch,
   onCompareRobustnessBranch,
+  onUseRobustnessVariant,
+  onCompareRobustnessVariant,
   canAddCompareSlot = false,
 }) => {
   const [expandedSlotIdx, setExpandedSlotIdx] = useState<number | null>(() =>
@@ -382,17 +379,17 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
 
                 {routeData && robustness && (
                   <button
-                    id={slotIdx === 0 ? 'btn-robustness' : `btn-robustness-${slotIdx}`}
+                    id={slotIdx === 0 ? 'btn-variants' : `btn-variants-${slotIdx}`}
                     type="button"
                     className={`ri-robustness-btn ${
                       slotIdx === activeSlotIdx && robustness.isOpen ? 'active' : ''
                     }`}
-                    title="Check route stability and find alternatives across config perturbations"
+                    title="Explore alternative segments and full routes"
                     aria-expanded={slotIdx === activeSlotIdx && robustness.isOpen}
                     onClick={() => {
                       if (slotIdx !== activeSlotIdx) {
                         onSelectActiveSlot?.(slotIdx);
-                        robustness.setIsOpen(true);
+                        robustness.openAndRun();
                       } else {
                         robustness.toggleOpen();
                       }
@@ -405,35 +402,25 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                           {robustness.completed}/{robustness.total}
                         </span>
                       </>
-                    ) : slotIdx === activeSlotIdx && robustness.analysis ? (
+                    ) : slotIdx === activeSlotIdx && robustness.visibleAnalysis ? (
                       <>
                         <Icon name="compare" size={12} />
                         <span>
-                          Robustness · {Math.round(robustness.analysis.overallStability * 100)}%
+                          Variants (
+                          {robustness.viewMode === 'segments'
+                            ? robustness.visibleAnalysis.branches.length
+                            : robustness.visibleAnalysis.corridors.length}
+                          )
                         </span>
                       </>
                     ) : (
                       <>
                         <Icon name="compare" size={12} />
-                        <span>Robustness</span>
+                        <span>Variants</span>
                       </>
                     )}
                   </button>
                 )}
-
-                <div className="ri-alternatives" role="group" aria-label="Route alternatives">
-                  {ALTERNATIVES.map((alt) => (
-                    <button
-                      key={alt.idx}
-                      type="button"
-                      className={`ri-alt-btn ${slot.alternativeIdx === alt.idx ? 'active' : ''}`}
-                      title={`Compute ${alt.label} route for ${profileMeta?.label || slot.profile}`}
-                      onClick={() => onSelectSlotAlternative(slotIdx, alt.idx)}
-                    >
-                      {alt.shortLabel}
-                    </button>
-                  ))}
-                </div>
 
                 <button
                   id={slotIdx === 0 ? 'btn-toggle-ri-collapse' : `btn-toggle-ri-collapse-${slotIdx}`}
@@ -580,6 +567,10 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
               <RobustnessStrip
                 scenarioCount={robustness.scenarioCount}
                 onChangeScenarioCount={robustness.setScenarioCount}
+                viewMode={robustness.viewMode}
+                onChangeViewMode={robustness.setViewMode}
+                filterMode={robustness.filterMode}
+                onChangeFilterMode={robustness.setFilterMode}
                 phase={robustness.phase}
                 completed={robustness.completed}
                 total={robustness.total}
@@ -587,7 +578,9 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                 workerStatus={robustness.workerStatus}
                 elapsedSec={robustness.elapsedSec}
                 error={robustness.error}
-                analysis={robustness.analysis}
+                analysis={robustness.visibleAnalysis}
+                totalBranchCount={robustness.analysis?.branches.length ?? 0}
+                totalCorridorCount={robustness.analysis?.corridors.length ?? 0}
                 showStabilityMap={robustness.showStabilityMap}
                 onToggleStabilityMap={robustness.setShowStabilityMap}
                 pinnedCorridorId={robustness.pinnedCorridorId}
@@ -595,8 +588,11 @@ export const RouteInfoDrawer: React.FC<RouteInfoDrawerProps> = ({
                 onTogglePinCorridor={(id) =>
                   robustness.setPinnedCorridorId((prev) => (prev === id ? null : id))
                 }
+                onFocusCoords={onFocusRobustnessCoords}
                 onUseBranch={(b) => onUseRobustnessBranch?.(b)}
                 onCompareBranch={(b) => onCompareRobustnessBranch?.(b)}
+                onUseVariant={(c) => onUseRobustnessVariant?.(c)}
+                onCompareVariant={(c) => onCompareRobustnessVariant?.(c)}
                 canAddCompareSlot={canAddCompareSlot}
                 units={units}
                 onStart={robustness.start}

@@ -1,17 +1,25 @@
 import React from 'react';
-import { formatDistance, formatElevation } from '../format.ts';
-import type { AlternativeBranch } from '../utils/robustness.ts';
+import { formatDistance, formatDuration, formatElevation } from '../format.ts';
+import type {
+  AlternativeBranch,
+  AlternativeCorridor,
+  SpanProfileMix,
+} from '../utils/robustness.ts';
 import { Icon } from './common/Icon.tsx';
 
+export type InspectedRobustnessItem =
+  | { kind: 'segment'; item: AlternativeBranch }
+  | { kind: 'variant'; item: AlternativeCorridor };
+
 interface BranchInspectorPopoverProps {
-  branch: AlternativeBranch;
+  inspected: InspectedRobustnessItem;
   completedCount: number;
   mapLabels: string[];
   screenPos: { x: number; y: number };
   isPinned: boolean;
   canAddCompareSlot: boolean;
-  onUseBranch: (branch: AlternativeBranch) => void;
-  onCompareBranch: (branch: AlternativeBranch) => void;
+  onUse: (inspected: InspectedRobustnessItem) => void;
+  onCompare: (inspected: InspectedRobustnessItem) => void;
   onClose: () => void;
 }
 
@@ -27,23 +35,36 @@ function formatSignedClimbM(deltaM: number): string {
   return `${sign}${formatElevation(Math.abs(deltaM))}`;
 }
 
-function formatKmRange(startM: number, endM: number): string {
-  return `km ${(startM / 1000).toFixed(1)} to ${(endM / 1000).toFixed(1)}`;
+function formatSignedTimeS(deltaS: number): string {
+  const mins = Math.round(Math.abs(deltaS) / 60);
+  if (mins < 1) return 'same time';
+  const sign = deltaS > 0 ? '+' : '-';
+  return `${sign}${formatDuration(Math.abs(deltaS))}`;
 }
 
 export const BranchInspectorPopover: React.FC<BranchInspectorPopoverProps> = ({
-  branch,
+  inspected,
   completedCount,
   mapLabels,
   screenPos,
   isPinned,
   canAddCompareSlot,
-  onUseBranch,
-  onCompareBranch,
+  onUse,
+  onCompare,
   onClose,
 }) => {
-  const shareText = branch.sharePct > 0 ? `${branch.sharePct}%` : '<1%';
-  const showMix = branch.branchMix.hasData;
+  const isSegment = inspected.kind === 'segment';
+  const common = inspected.item;
+  const shareText = common.sharePct > 0 ? `${common.sharePct}%` : '<1%';
+  const mix: SpanProfileMix = isSegment ? inspected.item.branchMix : inspected.item.routeMix;
+  const baseMix: SpanProfileMix = common.baseMix;
+  const showMix = mix.hasData;
+  const subtitle =
+    mapLabels.length > 0
+      ? `via ${mapLabels.join(', ')}`
+      : isSegment
+        ? 'Detour segment'
+        : 'Full route variant';
 
   return (
     <div
@@ -51,30 +72,27 @@ export const BranchInspectorPopover: React.FC<BranchInspectorPopoverProps> = ({
       style={{
         left: `${Math.round(screenPos.x)}px`,
         top: `${Math.round(screenPos.y)}px`,
-        '--branch-color': branch.color.line,
+        '--branch-color': common.color.line,
       } as React.CSSProperties}
       role={isPinned ? 'dialog' : 'tooltip'}
-      aria-label={`Branch details: ${branch.label}`}
+      aria-label={`Route option details: ${common.label}`}
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
     >
       <div className="bi-header">
-        <span className="bi-dot" style={{ backgroundColor: branch.color.line }} />
+        <span className="bi-dot" style={{ backgroundColor: common.color.line }} />
         <div className="bi-title-wrap">
-          <div className="bi-title">{branch.label}</div>
-          <div className="bi-subtitle">
-            {mapLabels.length > 0 ? `via ${mapLabels.join(', ')} · ` : ''}
-            {formatKmRange(branch.baseStartM, branch.baseEndM)}
-          </div>
+          <div className="bi-title">{common.label}</div>
+          <div className="bi-subtitle">{subtitle}</div>
         </div>
         <span className="bi-share">
-          {shareText} ({branch.probeCount}/{completedCount})
+          {shareText} ({common.probeCount}/{completedCount})
         </span>
         {isPinned && (
           <button
             type="button"
             className="collapse-btn bi-close-btn"
-            aria-label="Unpin branch details"
+            aria-label="Unpin details"
             title="Close"
             onClick={onClose}
           >
@@ -85,12 +103,18 @@ export const BranchInspectorPopover: React.FC<BranchInspectorPopoverProps> = ({
 
       <div className="bi-metrics">
         <span>
-          <strong>{formatDistance(branch.distanceM)}</strong> ({formatSignedDeltaM(branch.deltaDistanceM)})
+          <strong>{formatDistance(common.distanceM)}</strong> ({formatSignedDeltaM(common.deltaDistanceM)})
         </span>
         <span>·</span>
         <span>
-          <strong>+{formatElevation(branch.ascentM)}</strong> ({formatSignedClimbM(branch.deltaAscentM)})
+          <strong>+{formatElevation(common.ascentM)}</strong> ({formatSignedClimbM(common.deltaAscentM)})
         </span>
+        {!isSegment && (
+          <>
+            <span>·</span>
+            <span>{formatSignedTimeS(inspected.item.deltaTimeS)}</span>
+          </>
+        )}
       </div>
 
       {showMix && (
@@ -98,43 +122,33 @@ export const BranchInspectorPopover: React.FC<BranchInspectorPopoverProps> = ({
           <thead>
             <tr>
               <th />
-              <th>Branch</th>
-              <th>Replaced base</th>
+              <th>{isSegment ? 'Branch' : 'Variant'}</th>
+              <th>{isSegment ? 'Replaced base' : 'Base route'}</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td>Surface</td>
-              <td>{branch.branchMix.dominantSurface}</td>
-              <td>{branch.baseMix.hasData ? branch.baseMix.dominantSurface : '-'}</td>
+              <td>{mix.dominantSurface}</td>
+              <td>{baseMix.hasData ? baseMix.dominantSurface : '-'}</td>
             </tr>
             <tr>
               <td>Roads</td>
-              <td>{branch.branchMix.dominantRoad}</td>
-              <td>{branch.baseMix.hasData ? branch.baseMix.dominantRoad : '-'}</td>
+              <td>{mix.dominantRoad}</td>
+              <td>{baseMix.hasData ? baseMix.dominantRoad : '-'}</td>
             </tr>
             <tr>
               <td>Traffic</td>
-              <td>{branch.branchMix.dominantTraffic}</td>
-              <td>{branch.baseMix.hasData ? branch.baseMix.dominantTraffic : '-'}</td>
+              <td>{mix.dominantTraffic}</td>
+              <td>{baseMix.hasData ? baseMix.dominantTraffic : '-'}</td>
             </tr>
             <tr>
               <td>Noise</td>
-              <td>{branch.branchMix.dominantNoise}</td>
-              <td>{branch.baseMix.hasData ? branch.baseMix.dominantNoise : '-'}</td>
+              <td>{mix.dominantNoise}</td>
+              <td>{baseMix.hasData ? baseMix.dominantNoise : '-'}</td>
             </tr>
           </tbody>
         </table>
-      )}
-
-      {branch.probeLabels.length > 0 && (
-        <div className="bi-drivers">
-          {branch.probeLabels.slice(0, 4).map((lbl) => (
-            <span key={lbl} className="bi-driver-chip">
-              {lbl}
-            </span>
-          ))}
-        </div>
       )}
 
       {isPinned ? (
@@ -142,10 +156,14 @@ export const BranchInspectorPopover: React.FC<BranchInspectorPopoverProps> = ({
           <button
             type="button"
             className="btn btn-primary btn-action-compact bi-action-btn"
-            title="Fit the minimal via-waypoints needed to follow this entire branch under your active profile"
-            onClick={() => onUseBranch(branch)}
+            title={
+              isSegment
+                ? 'Fit the minimal via-waypoints needed to follow this entire branch under your active profile'
+                : 'Fit the minimal via-waypoints needed to follow this route variant under your active profile'
+            }
+            onClick={() => onUse(inspected)}
           >
-            Use branch
+            {isSegment ? 'Use branch' : 'Use variant'}
           </button>
           <button
             type="button"
@@ -153,16 +171,18 @@ export const BranchInspectorPopover: React.FC<BranchInspectorPopoverProps> = ({
             disabled={!canAddCompareSlot}
             title={
               canAddCompareSlot
-                ? 'Compare the full perturbed profile that chose this branch'
+                ? 'Compare the full perturbed profile that chose this option'
                 : 'Maximum of 3 compared profiles reached on this route'
             }
-            onClick={() => onCompareBranch(branch)}
+            onClick={() => onCompare(inspected)}
           >
             + Compare profile
           </button>
         </div>
       ) : (
-        <div className="bi-hint">Click branch to pin, apply, or compare</div>
+        <div className="bi-hint">
+          Click {isSegment ? 'branch' : 'variant'} to pin, apply, or compare
+        </div>
       )}
     </div>
   );

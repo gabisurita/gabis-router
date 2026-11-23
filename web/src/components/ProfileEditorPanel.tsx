@@ -189,7 +189,9 @@ export const ProfileEditorPanel: React.FC<ProfileEditorPanelProps> = ({ routing,
     routing.draftProfile && routing.draftProfile.id === routing.profile
       ? routing.draftProfile
       : null;
-  const savedCustom = routing.customProfiles.find((c) => c.id === routing.profile);
+  const savedCustom =
+    routing.customProfiles.find((c) => c.id === routing.profile) ||
+    routing.ephemeralProfiles.find((c) => c.id === routing.profile);
   const initialCustom = activeDraft || savedCustom;
   const initialTemplate: BaseTemplateId =
     initialCustom?.baseTemplate ||

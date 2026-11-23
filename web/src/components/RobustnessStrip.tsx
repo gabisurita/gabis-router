@@ -1,13 +1,17 @@
 import React, { useMemo, useState } from 'react';
 import {
   formatDistance,
+  formatDuration,
   formatElevation,
   type Units,
 } from '../format.ts';
 import {
   STABILITY_COLORS,
   type AlternativeBranch,
+  type AlternativeCorridor,
   type RobustnessAnalysis,
+  type RobustnessFilterMode,
+  type RobustnessViewMode,
   type ScenarioPresetCount,
 } from '../utils/robustness.ts';
 import { Icon } from './common/Icon.tsx';
@@ -18,6 +22,10 @@ const SCENARIO_PRESETS: ScenarioPresetCount[] = [20, 40, 80, 160, 320];
 interface RobustnessStripProps {
   scenarioCount: ScenarioPresetCount;
   onChangeScenarioCount: (count: ScenarioPresetCount) => void;
+  viewMode: RobustnessViewMode;
+  onChangeViewMode: (mode: RobustnessViewMode) => void;
+  filterMode: RobustnessFilterMode;
+  onChangeFilterMode: (mode: RobustnessFilterMode) => void;
   phase: 'idle' | 'running' | 'done' | 'error';
   completed: number;
   total: number;
@@ -26,13 +34,18 @@ interface RobustnessStripProps {
   elapsedSec: number;
   error: string | null;
   analysis: RobustnessAnalysis | null;
+  totalBranchCount: number;
+  totalCorridorCount: number;
   showStabilityMap: boolean;
   onToggleStabilityMap: (next: boolean) => void;
   pinnedCorridorId: string | null;
   onHoverCorridor: (id: string | null) => void;
   onTogglePinCorridor: (id: string) => void;
+  onFocusCoords?: (coords: [number, number][]) => void;
   onUseBranch: (branch: AlternativeBranch) => void;
   onCompareBranch: (branch: AlternativeBranch) => void;
+  onUseVariant: (corridor: AlternativeCorridor) => void;
+  onCompareVariant: (corridor: AlternativeCorridor) => void;
   canAddCompareSlot: boolean;
   units: Units;
   onStart: (overrideCount?: ScenarioPresetCount) => void;
@@ -52,9 +65,20 @@ function formatSignedElevation(deltaM: number): string {
   return `${sign}${formatElevation(Math.abs(deltaM))}`;
 }
 
+function formatSignedDuration(deltaS: number): string {
+  const mins = Math.round(Math.abs(deltaS) / 60);
+  if (mins < 1) return 'same time';
+  const sign = deltaS > 0 ? '+' : '-';
+  return `${sign}${formatDuration(Math.abs(deltaS))}`;
+}
+
 export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
   scenarioCount,
   onChangeScenarioCount,
+  viewMode,
+  onChangeViewMode,
+  filterMode,
+  onChangeFilterMode,
   phase,
   completed,
   total,
@@ -63,13 +87,18 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
   elapsedSec,
   error,
   analysis,
+  totalBranchCount,
+  totalCorridorCount,
   showStabilityMap,
   onToggleStabilityMap,
   pinnedCorridorId,
   onHoverCorridor,
   onTogglePinCorridor,
+  onFocusCoords,
   onUseBranch,
   onCompareBranch,
+  onUseVariant,
+  onCompareVariant,
   canAddCompareSlot,
   units: _units,
   onStart,
@@ -85,6 +114,21 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
     ? analysis.dimensions.filter((d) => d.maxDivergencePct >= 8).slice(0, 3)
     : [];
 
+  const stabilityDetailsTooltip = analysis
+    ? [
+        `Base corridor: ${analysis.baseMatchingProbes}/${analysis.completedCount} runs`,
+        `Core spine: ${spinePct}%`,
+        ...(fragilePct > 0 ? [`Sensitive: ${fragilePct}%`] : []),
+        ...(shiftedAxes.length > 0
+          ? [
+              `Most sensitive to: ${shiftedAxes
+                .map((d) => `${d.dimension} (${d.maxDivergencePct}%)`)
+                .join(', ')}`,
+            ]
+          : []),
+      ].join(' · ')
+    : '';
+
   const displayedBranches = useMemo(() => {
     if (!analysis) return [];
     if (branchSort === 'route') {
@@ -94,20 +138,20 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
   }, [analysis, branchSort]);
 
   return (
-    <div className="ri-robustness-strip" role="region" aria-label="Route robustness analysis">
+    <div className="ri-robustness-strip" role="region" aria-label="Route variants">
       {phase === 'idle' && (
         <div className="ri-robust-prompt">
           <div className="ri-robust-prompt-text">
             <span className="ri-robust-title">
-              Robustness check
+              Variants
               <InfoButton
-                tooltip="Runs 28 single-axis sweeps plus deterministic multi-axis jitter samples across traffic, noise, bike-route adhesion, hills, surface, trails, turns, crossings, and scenery to measure route stability and uncover trade-off corridors."
-                ariaLabel="About Robustness Analysis"
+                tooltip="Samples perturbed versions of your active profile in parallel to find alternative segments and full routes."
+                ariaLabel="About Route Variants"
               />
             </span>
             <span className="ri-robust-note">
-              Runs {scenarioCount} config scenarios in parallel to map segment stability and
-              alternatives. This may take up to a minute on longer routes.
+              Run {scenarioCount} perturbed scenarios in parallel to find alternative segments and
+              full routes.
             </span>
           </div>
           <div className="ri-robust-prompt-actions">
@@ -130,13 +174,13 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
               className="btn btn-primary btn-action-compact ri-robust-run-btn"
               onClick={() => onStart()}
             >
-              <span>Run analysis</span>
+              <span>Find variants</span>
             </button>
             <button
               type="button"
               className="collapse-btn"
-              title="Close robustness panel"
-              aria-label="Close robustness panel"
+              title="Close variants panel"
+              aria-label="Close variants panel"
               onClick={onClose}
             >
               <Icon name="close" size={13} />
@@ -158,9 +202,7 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
               </span>
             </div>
             <div className="ri-robust-progress-right">
-              <span className="ri-robust-elapsed">
-                {elapsedSec}s elapsed · may take up to a minute
-              </span>
+              <span className="ri-robust-elapsed">{elapsedSec}s elapsed</span>
               <button
                 id="btn-cancel-robustness"
                 type="button"
@@ -185,7 +227,7 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
 
       {phase === 'error' && (
         <div className="ri-robust-error">
-          <span>Robustness check failed: {error}</span>
+          <span>Variant search failed: {error}</span>
           <div className="ri-robust-prompt-actions">
             <button type="button" className="btn-toolbar-mini" onClick={() => onStart()}>
               <Icon name="refresh" size={12} />
@@ -194,7 +236,7 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
             <button
               type="button"
               className="collapse-btn"
-              aria-label="Close robustness panel"
+              aria-label="Close variants panel"
               onClick={onClose}
             >
               <Icon name="close" size={13} />
@@ -217,37 +259,66 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
                         ? STABILITY_COLORS.medium
                         : STABILITY_COLORS.low,
                 }}
-                title="Distance-weighted share of perturbation scenarios that follow each segment of the current route"
+                title={stabilityDetailsTooltip}
               >
-                <strong>{stabilityPct}%</strong> route stability
+                <strong>{stabilityPct}%</strong> stability
               </span>
-              <span className="ri-robust-stat-inline">
-                Base corridor:{' '}
-                <strong>
-                  {analysis.baseMatchingProbes}/{analysis.completedCount}
-                </strong>
-              </span>
-              <span className="ri-robust-stat-inline">
-                Core spine: <strong>{spinePct}%</strong>
-              </span>
-              {fragilePct > 0 && (
-                <span className="ri-robust-stat-inline">
-                  Sensitive: <strong>{fragilePct}%</strong>
-                </span>
-              )}
-              {shiftedAxes.length > 0 && (
-                <span
-                  className="ri-robust-axes-inline"
-                  title="Single-axis preference shifts causing the largest corridor divergence"
-                >
-                  Most sensitive to:{' '}
-                  {shiftedAxes.map((d) => `${d.dimension} (${d.maxDivergencePct}%)`).join(', ')}
-                </span>
-              )}
+              <InfoButton
+                tooltip={stabilityDetailsTooltip}
+                ariaLabel="Stability details"
+              />
             </div>
 
             <div className="ri-robust-summary-controls">
-              {displayedBranches.length > 1 && (
+              <div
+                className="ri-alternatives ri-robust-count-group"
+                role="group"
+                aria-label="Group alternatives by full routes or segments"
+              >
+                <button
+                  type="button"
+                  className={`ri-alt-btn ${viewMode === 'variants' ? 'active' : ''}`}
+                  title="Group full alternative routes"
+                  onClick={() => onChangeViewMode('variants')}
+                >
+                  Full routes ({analysis.corridors.length})
+                </button>
+                <button
+                  type="button"
+                  className={`ri-alt-btn ${viewMode === 'segments' ? 'active' : ''}`}
+                  title="Group local detour segments independently along the route"
+                  onClick={() => onChangeViewMode('segments')}
+                >
+                  Segments ({analysis.branches.length})
+                </button>
+              </div>
+              <div
+                className="ri-alternatives ri-robust-count-group"
+                role="group"
+                aria-label="Filter alternatives by probability mass"
+              >
+                <button
+                  type="button"
+                  className={`ri-alt-btn ${filterMode === 'frequent' ? 'active' : ''}`}
+                  title="Show only high-probability alternatives (top probability mass)"
+                  onClick={() => onChangeFilterMode('frequent')}
+                >
+                  Frequent
+                </button>
+                <button
+                  type="button"
+                  className={`ri-alt-btn ${filterMode === 'all' ? 'active' : ''}`}
+                  title={`Show all discovered ${
+                    viewMode === 'segments'
+                      ? `${totalBranchCount} segments`
+                      : `${totalCorridorCount} full routes`
+                  }`}
+                  onClick={() => onChangeFilterMode('all')}
+                >
+                  All
+                </button>
+              </div>
+              {viewMode === 'segments' && displayedBranches.length > 1 && (
                 <div
                   className="ri-alternatives ri-robust-count-group"
                   role="group"
@@ -259,7 +330,7 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
                     title="Order detour branches by scenario share"
                     onClick={() => setBranchSort('share')}
                   >
-                    By share
+                    Share
                   </button>
                   <button
                     type="button"
@@ -267,7 +338,7 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
                     title="Order detour branches from start to finish along the route"
                     onClick={() => setBranchSort('route')}
                   >
-                    Along route
+                    Order
                   </button>
                 </div>
               )}
@@ -283,7 +354,7 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
                   <i style={{ backgroundColor: STABILITY_COLORS.medium }} />
                   <i style={{ backgroundColor: STABILITY_COLORS.low }} />
                 </span>
-                <span>Stability map</span>
+                <span>Stability</span>
               </button>
 
               {phase === 'done' && (
@@ -313,8 +384,8 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
                   <button
                     type="button"
                     className="btn-toolbar-mini btn-toolbar-ghost"
-                    title="Re-run robustness check"
-                    aria-label="Re-run robustness check"
+                    title="Re-run variant search"
+                    aria-label="Re-run variant search"
                     onClick={() => onStart()}
                   >
                     <Icon name="refresh" size={12} />
@@ -322,8 +393,8 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
                   <button
                     type="button"
                     className="collapse-btn"
-                    title="Close robustness panel"
-                    aria-label="Close robustness panel"
+                    title="Close variants panel"
+                    aria-label="Close variants panel"
                     onClick={onClose}
                   >
                     <Icon name="close" size={13} />
@@ -333,57 +404,142 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
             </div>
           </div>
 
-          {displayedBranches.length === 0 ? (
+          {viewMode === 'segments' ? (
+            displayedBranches.length === 0 ? (
+              phase === 'done' && (
+                <div className="ri-robust-empty">
+                  All {analysis.completedCount} tested scenarios stayed on the same route.
+                </div>
+              )
+            ) : (
+              <div className="ri-corridors-row">
+                {displayedBranches.map((b) => {
+                  const isPinned = pinnedCorridorId === b.id;
+                  const mixTag = b.branchMix.hasData
+                    ? `${b.branchMix.dominantSurface} · ${b.branchMix.dominantNoise}`
+                    : `${formatDistance(b.distanceM)}`;
+                  return (
+                    <div
+                      key={b.id}
+                      className={`ri-corridor-card ${isPinned ? 'active' : ''}`}
+                      style={{ '--corridor-color': b.color.line } as React.CSSProperties}
+                      onPointerEnter={() => onHoverCorridor(b.id)}
+                      onPointerLeave={() => onHoverCorridor(null)}
+                      onClick={() => {
+                        onTogglePinCorridor(b.id);
+                        if (!isPinned && onFocusCoords && b.coordinates.length >= 2) {
+                          onFocusCoords(b.coordinates);
+                        }
+                      }}
+                    >
+                      <div className="ri-corridor-top">
+                        <span
+                          className="ri-corridor-dot"
+                          style={{ backgroundColor: b.color.line }}
+                        />
+                        <span className="ri-corridor-label">{b.label}</span>
+                        <span
+                          className="ri-corridor-support"
+                          title={`Chosen by ${b.probeCount} of ${analysis.completedCount} scenarios (${b.sharePct}%)`}
+                        >
+                          {b.sharePct > 0 ? `${b.sharePct}%` : '<1%'} ({b.probeCount}/
+                          {analysis.completedCount})
+                        </span>
+                      </div>
+                      <div className="ri-corridor-deltas">
+                        <span>{formatDistance(b.distanceM)}</span>
+                        <span>·</span>
+                        <span>{formatSignedDistance(b.deltaDistanceM)}</span>
+                        <span>·</span>
+                        <span>{formatSignedElevation(b.deltaAscentM)}</span>
+                      </div>
+                      <div className="ri-corridor-footer">
+                        <span className="ri-corridor-abs" title={mixTag}>
+                          {mixTag}
+                        </span>
+                        <div className="ri-corridor-card-actions">
+                          <button
+                            type="button"
+                            className="ri-corridor-compare-btn"
+                            title={`Fit minimal via-waypoints to follow "${b.label}" under your active profile`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onUseBranch(b);
+                            }}
+                          >
+                            Use
+                          </button>
+                          <button
+                            type="button"
+                            className="ri-corridor-compare-btn"
+                            disabled={!canAddCompareSlot}
+                            title={
+                              canAddCompareSlot
+                                ? `Compare full profile for "${b.label}" side by side`
+                                : 'Maximum of 3 compared profiles reached on this route'
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onCompareBranch(b);
+                            }}
+                          >
+                            + Compare
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )
+          ) : analysis.corridors.length === 0 ? (
             phase === 'done' && (
               <div className="ri-robust-empty">
-                All {analysis.completedCount} tested config scenarios stayed on the same route.
+                All {analysis.completedCount} tested config scenarios stayed on the same route
+                corridor.
               </div>
             )
           ) : (
             <div className="ri-corridors-row">
-              {displayedBranches.map((b) => {
-                const isPinned = pinnedCorridorId === b.id;
-                const extraCount = b.probeLabels.length - 1;
-                const mixTag = b.branchMix.hasData
-                  ? `${b.branchMix.dominantSurface} · ${b.branchMix.dominantRoad}`
-                  : `${formatDistance(b.distanceM)}`;
+              {analysis.corridors.map((c) => {
+                const isPinned = pinnedCorridorId === c.id;
+                const mixTag = c.routeMix.hasData
+                  ? `${c.routeMix.dominantSurface} · ${c.routeMix.dominantNoise}`
+                  : `${formatDistance(c.distanceM)} · ${formatElevation(c.ascentM)} climb`;
                 return (
                   <div
-                    key={b.id}
+                    key={c.id}
                     className={`ri-corridor-card ${isPinned ? 'active' : ''}`}
-                    style={{ '--corridor-color': b.color.line } as React.CSSProperties}
-                    onPointerEnter={() => onHoverCorridor(b.id)}
+                    style={{ '--corridor-color': c.color.line } as React.CSSProperties}
+                    onPointerEnter={() => onHoverCorridor(c.id)}
                     onPointerLeave={() => onHoverCorridor(null)}
-                    onClick={() => onTogglePinCorridor(b.id)}
+                    onClick={() => {
+                      onTogglePinCorridor(c.id);
+                      if (!isPinned && onFocusCoords && c.coordinates.length >= 2) {
+                        onFocusCoords(c.coordinates);
+                      }
+                    }}
                   >
                     <div className="ri-corridor-top">
                       <span
                         className="ri-corridor-dot"
-                        style={{ backgroundColor: b.color.line }}
+                        style={{ backgroundColor: c.color.line }}
                       />
-                      <span
-                        className="ri-corridor-label"
-                        title={`${b.probeLabels.join(', ')}: ${b.description}`}
-                      >
-                        {b.label}
-                        {extraCount > 0 ? ` +${extraCount}` : ''}
-                      </span>
+                      <span className="ri-corridor-label">{c.label}</span>
                       <span
                         className="ri-corridor-support"
-                        title={`Chosen by ${b.probeCount} of ${analysis.completedCount} scenarios (${b.sharePct}%)`}
+                        title={`Chosen by ${c.probeCount} of ${analysis.completedCount} scenarios (${c.sharePct}%)`}
                       >
-                        {b.sharePct > 0 ? `${b.sharePct}%` : '<1%'} ({b.probeCount}/
+                        {c.sharePct > 0 ? `${c.sharePct}%` : '<1%'} ({c.probeCount}/
                         {analysis.completedCount})
                       </span>
                     </div>
                     <div className="ri-corridor-deltas">
-                      <span>
-                        km {(b.baseStartM / 1000).toFixed(1)}-{(b.baseEndM / 1000).toFixed(1)}
-                      </span>
+                      <span>{formatSignedDistance(c.deltaDistanceM)}</span>
                       <span>·</span>
-                      <span>{formatSignedDistance(b.deltaDistanceM)}</span>
+                      <span>{formatSignedElevation(c.deltaAscentM)}</span>
                       <span>·</span>
-                      <span>{formatSignedElevation(b.deltaAscentM)}</span>
+                      <span>{formatSignedDuration(c.deltaTimeS)}</span>
                     </div>
                     <div className="ri-corridor-footer">
                       <span className="ri-corridor-abs" title={mixTag}>
@@ -393,10 +549,10 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
                         <button
                           type="button"
                           className="ri-corridor-compare-btn"
-                          title={`Fit minimal via-waypoints to follow "${b.label}" under your active profile`}
+                          title={`Fit minimal via-waypoints to follow "${c.label}" under your active profile`}
                           onClick={(e) => {
                             e.stopPropagation();
-                            onUseBranch(b);
+                            onUseVariant(c);
                           }}
                         >
                           Use
@@ -407,12 +563,12 @@ export const RobustnessStrip: React.FC<RobustnessStripProps> = ({
                           disabled={!canAddCompareSlot}
                           title={
                             canAddCompareSlot
-                              ? `Compare full profile for "${b.label}" side by side`
+                              ? `Compare "${c.label}" side by side with full elevation and surface breakdown`
                               : 'Maximum of 3 compared profiles reached on this route'
                           }
                           onClick={(e) => {
                             e.stopPropagation();
-                            onCompareBranch(b);
+                            onCompareVariant(c);
                           }}
                         >
                           + Compare

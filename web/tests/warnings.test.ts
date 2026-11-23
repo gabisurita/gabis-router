@@ -215,3 +215,30 @@ test('extractRouteWarnings detects short out-and-back U-turn rollbacks and match
   assert.equal(warnings[0].waypointIndex, 1);
   assert.ok(warnings[0].detail.includes('Waypoint 1'));
 });
+
+test('extractRouteWarnings merges consecutive dangerous_road warnings of the same type across <=500m gaps', () => {
+  const route = makeStraightRoute([
+    makeMsgRow(500, 'highway=residential'),
+    makeMsgRow(250, 'highway=primary estimated_traffic_class=6'), // 500..750
+    makeMsgRow(150, 'highway=primary estimated_traffic_class=6 busway=lane'), // 150m bus-lane gap
+    makeMsgRow(200, 'highway=primary estimated_traffic_class=6'), // 900..1100
+    makeMsgRow(420, 'highway=primary estimated_traffic_class=6 cycleway=lane'), // 420m cycle-lane gap
+    makeMsgRow(300, 'highway=primary estimated_traffic_class=6'), // 1520..1820
+    makeMsgRow(600, 'highway=residential'), // >500m gap -> next should stay separate
+    makeMsgRow(180, 'highway=primary estimated_traffic_class=6'), // 2420..2600
+    makeMsgRow(300, 'highway=residential'),
+    makeMsgRow(60, 'highway=primary estimated_traffic_class=6'), // <100m crossing -> still ignored
+    makeMsgRow(200, 'highway=residential'),
+    makeMsgRow(60, 'highway=primary estimated_traffic_class=6'), // <100m crossing -> still ignored
+  ]);
+
+  const warnings = extractRouteWarnings(route);
+  assert.equal(warnings.length, 2);
+  assert.equal(warnings[0].kind, 'dangerous_road');
+  assert.equal(warnings[0].from, 500);
+  assert.equal(warnings[0].to, 1820);
+  assert.equal(warnings[0].distanceM, 750); // 250 + 200 + 300 actual flagged meters
+  assert.equal(warnings[1].from, 2420);
+  assert.equal(warnings[1].to, 2600);
+  assert.equal(warnings[1].distanceM, 180);
+});

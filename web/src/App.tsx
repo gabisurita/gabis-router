@@ -4,7 +4,7 @@ import type { SegmentHighlight } from './utils/classification.ts';
 import { MAX_ROUTES, MAX_ROUTE_SLOTS } from './types.ts';
 import type { SuggestionDimLevel } from './utils/map-layers.ts';
 import { TEMPLATE_PRESETS } from './utils/profile-editor.ts';
-import type { AlternativeBranch } from './utils/robustness.ts';
+import type { AlternativeBranch, AlternativeCorridor } from './utils/robustness.ts';
 import {
   decodePolyline5,
   fetchLibraryIndex,
@@ -66,11 +66,16 @@ export const App: React.FC = () => {
 
   const routing = useRouting(offline.isOfflineMode);
 
+  const allCustomProfiles = useMemo(
+    () => [...routing.customProfiles, ...routing.ephemeralProfiles],
+    [routing.customProfiles, routing.ephemeralProfiles],
+  );
+
   const robustness = useRobustness({
     activeSlot: routing.slots[routing.activeSlotIdx],
     activeSlotIdx: routing.activeSlotIdx,
     isOfflineMode: offline.isOfflineMode,
-    customProfiles: routing.customProfiles,
+    customProfiles: allCustomProfiles,
     draftProfile: routing.draftProfile,
     getProfileMeta: routing.getProfileMeta,
   });
@@ -81,29 +86,26 @@ export const App: React.FC = () => {
     [routing.slots, routing.activeRouteIdx],
   );
 
-  const handleCompareRobustnessBranch = useCallback(
-    (branch: AlternativeBranch) => {
+  const handleCompareRobustnessOption = useCallback(
+    (option: Pick<AlternativeBranch, 'id' | 'label' | 'description' | 'baseTemplate' | 'axes' | 'fullDsl'>) => {
       const baseMeta = routing.getProfileMeta(routing.profile);
       const baseLabel = baseMeta.shortLabel || baseMeta.label || routing.profile;
-      const slug = `${routing.profile}-${branch.id}`
+      const slug = `${routing.profile}-${option.id}`
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-+|-+$/g, '');
-      const customId = `custom:robust-${slug}`;
-      const tpl = branch.baseTemplate || 'gabis-fast-city';
-      routing.saveCustomProfile(
-        {
-          id: customId,
-          name: `${baseLabel} · ${branch.label}`,
-          summary: branch.description,
-          baseTemplate: tpl,
-          mode: branch.axes ? 'detailed' : 'dsl',
-          axes: branch.axes || { ...TEMPLATE_PRESETS[tpl].axes },
-          dsl: branch.fullDsl,
-          updatedAt: Date.now(),
-        },
-        false,
-      );
+      const customId = `custom:variant-${slug}`;
+      const tpl = option.baseTemplate || 'gabis-fast-city';
+      routing.registerEphemeralProfile({
+        id: customId,
+        name: `${baseLabel} · ${option.label}`,
+        summary: option.description,
+        baseTemplate: tpl,
+        mode: option.axes ? 'detailed' : 'dsl',
+        axes: option.axes || { ...TEMPLATE_PRESETS[tpl].axes },
+        dsl: option.fullDsl,
+        updatedAt: Date.now(),
+      });
       routing.addProfileSlot(customId);
     },
     [routing],
@@ -111,7 +113,20 @@ export const App: React.FC = () => {
 
   const handleUseRobustnessBranch = useCallback(
     (branch: AlternativeBranch) => {
-      void routing.applyBranchCoordinates(branch.coordinates, branch.midpoint);
+      void routing.applyBranchCoordinates(branch.coordinates, branch.midpoint, {
+        kind: 'segment',
+        baseStartM: branch.baseStartM,
+        baseEndM: branch.baseEndM,
+      });
+    },
+    [routing],
+  );
+
+  const handleUseRobustnessVariant = useCallback(
+    (corridor: AlternativeCorridor) => {
+      void routing.applyBranchCoordinates(corridor.coordinates, corridor.midpoint, {
+        kind: 'variant',
+      });
     },
     [routing],
   );
@@ -735,6 +750,36 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const handleFocusRobustnessCoords = useCallback((coords: [number, number][]) => {
+    const map = mapInstanceRef.current;
+    if (!map || coords.length < 2) return;
+    let minLon = Infinity;
+    let maxLon = -Infinity;
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    for (const [lon, lat] of coords) {
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+    if (!Number.isFinite(minLon)) return;
+    const isNarrow = isMobileViewport();
+    map.fitBounds(
+      [
+        [minLon, minLat],
+        [maxLon, maxLat],
+      ],
+      {
+        padding: isNarrow
+          ? { top: 60, right: 36, bottom: 260, left: 36 }
+          : { top: 72, right: 72, bottom: 320, left: 400 },
+        maxZoom: 14.5,
+        duration: 450,
+      },
+    );
+  }, []);
+
   const getMapCenter = useCallback(() => {
     const map = mapInstanceRef.current;
     if (map) {
@@ -894,7 +939,6 @@ export const App: React.FC = () => {
         getProfileMeta={routing.getProfileMeta}
         statusMessage={routing.status}
         units={settings.units}
-        onSelectSlotAlternative={routing.selectSlotAlternative}
         onRemoveSlot={routing.removeProfileSlot}
         isCollapsed={isRouteInfoCollapsed}
         onToggleCollapse={() => {
@@ -910,10 +954,13 @@ export const App: React.FC = () => {
         onHoverPosition={setHoverPosition}
         onHighlightSegment={setSegmentHighlight}
         onFlyTo={handleFlyTo}
+        onFocusRobustnessCoords={handleFocusRobustnessCoords}
         onRemoveWaypoint={routing.removeWaypoint}
         robustness={robustness}
         onUseRobustnessBranch={handleUseRobustnessBranch}
-        onCompareRobustnessBranch={handleCompareRobustnessBranch}
+        onCompareRobustnessBranch={handleCompareRobustnessOption}
+        onUseRobustnessVariant={handleUseRobustnessVariant}
+        onCompareRobustnessVariant={handleCompareRobustnessOption}
         canAddCompareSlot={activeRouteSlotCount < MAX_ROUTE_SLOTS}
       />
 
@@ -952,7 +999,8 @@ export const App: React.FC = () => {
         onHoverLibraryRoute={setHoveredLibraryRoute}
         onMapViewportChange={handleMapViewportChange}
         isRobustnessOpen={robustness.isOpen}
-        robustnessAnalysis={robustness.analysis}
+        robustnessAnalysis={robustness.visibleAnalysis}
+        robustnessViewMode={robustness.viewMode}
         showStabilityMap={robustness.showStabilityMap}
         focusedRobustnessCorridorId={robustness.focusedCorridorId}
         pinnedRobustnessCorridorId={robustness.pinnedCorridorId}
@@ -962,7 +1010,9 @@ export const App: React.FC = () => {
           robustness.setPinnedCorridorId((prev) => (prev === id ? null : id))
         }
         onUseRobustnessBranch={handleUseRobustnessBranch}
-        onCompareRobustnessBranch={handleCompareRobustnessBranch}
+        onCompareRobustnessBranch={handleCompareRobustnessOption}
+        onUseRobustnessVariant={handleUseRobustnessVariant}
+        onCompareRobustnessVariant={handleCompareRobustnessOption}
       />
 
       <SettingsSection

@@ -17,8 +17,11 @@ import {
   createRobustnessSession,
   buildRobustnessProbes,
   DEFAULT_SCENARIO_COUNT,
+  filterRobustnessAnalysis,
   type RobustnessAnalysis,
+  type RobustnessFilterMode,
   type RobustnessSession,
+  type RobustnessViewMode,
   type ScenarioPresetCount,
 } from '../utils/robustness.ts';
 import { getSharedWasmModule } from './useRouting.ts';
@@ -52,9 +55,28 @@ export function useRobustness({
   const [elapsedSec, setElapsedSec] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<RobustnessAnalysis | null>(null);
-  const [showStabilityMap, setShowStabilityMap] = useState(true);
+  const [viewMode, setViewModeState] = useState<RobustnessViewMode>('variants');
+  const [filterMode, setFilterModeState] = useState<RobustnessFilterMode>('frequent');
+  const [showStabilityMap, setShowStabilityMap] = useState(false);
   const [hoveredCorridorId, setHoveredCorridorId] = useState<string | null>(null);
   const [pinnedCorridorId, setPinnedCorridorId] = useState<string | null>(null);
+
+  const setViewMode = useCallback((mode: RobustnessViewMode) => {
+    setViewModeState(mode);
+    setHoveredCorridorId(null);
+    setPinnedCorridorId(null);
+  }, []);
+
+  const setFilterMode = useCallback((mode: RobustnessFilterMode) => {
+    setFilterModeState(mode);
+    setHoveredCorridorId(null);
+    setPinnedCorridorId(null);
+  }, []);
+
+  const visibleAnalysis = useMemo(
+    () => (analysis ? filterRobustnessAnalysis(analysis, filterMode) : null),
+    [analysis, filterMode],
+  );
 
   const workersRef = useRef<Array<Worker | null>>([]);
   const runIdRef = useRef(0);
@@ -376,14 +398,31 @@ export function useRobustness({
     ],
   );
 
+  const pendingAutoStartRef = useRef(false);
+
+  useEffect(() => {
+    if (pendingAutoStartRef.current && isOpen && phase === 'idle' && !analysis && activeSlot?.route) {
+      pendingAutoStartRef.current = false;
+      void start();
+    }
+  }, [isOpen, phase, analysis, activeSlot?.route, start]);
+
   const toggleOpen = useCallback(() => {
-    setIsOpen((prev) => {
-      const next = !prev;
-      if (!next) {
-        setHoveredCorridorId(null);
+    if (isOpen) {
+      pendingAutoStartRef.current = false;
+      setIsOpen(false);
+      setHoveredCorridorId(null);
+    } else {
+      setIsOpen(true);
+      if (phase === 'idle' && !analysis) {
+        void start();
       }
-      return next;
-    });
+    }
+  }, [isOpen, phase, analysis, start]);
+
+  const openAndRun = useCallback(() => {
+    setIsOpen(true);
+    pendingAutoStartRef.current = true;
   }, []);
 
   const focusedCorridorId = hoveredCorridorId ?? pinnedCorridorId;
@@ -392,6 +431,7 @@ export function useRobustness({
     isOpen,
     setIsOpen,
     toggleOpen,
+    openAndRun,
     scenarioCount,
     setScenarioCount,
     phase,
@@ -402,6 +442,11 @@ export function useRobustness({
     elapsedSec,
     error,
     analysis,
+    visibleAnalysis,
+    viewMode,
+    setViewMode,
+    filterMode,
+    setFilterMode,
     showStabilityMap,
     setShowStabilityMap,
     hoveredCorridorId,

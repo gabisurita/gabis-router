@@ -552,6 +552,11 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                       title={slotMeta.summary}
                       onChange={(e) => routing.setSlotProfile(slotIdx, e.target.value as ProfileName)}
                     >
+                      {routing.ephemeralProfiles.some((ep) => ep.id === slot.profile) && (
+                        <optgroup label="Compared Variant">
+                          <option value={slot.profile}>{slotMeta.label}</option>
+                        </optgroup>
+                      )}
                       {(slot.profile === 'custom:__draft__' || routing.customProfiles.length > 0) && (
                         <optgroup label="Custom Profiles">
                           {slot.profile === 'custom:__draft__' && (

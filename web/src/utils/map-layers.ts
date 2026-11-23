@@ -696,6 +696,7 @@ export function syncRobustnessLayers(
   analysis: RobustnessAnalysis | null,
   showStabilityMap: boolean,
   focusedBranchId: string | null,
+  viewMode: 'segments' | 'variants' = 'segments',
 ) {
   const beforeId = getFirstLabelLayerId(map);
   const active = isOpen && Boolean(analysis);
@@ -707,75 +708,116 @@ export function syncRobustnessLayers(
   const hasFocus = active && Boolean(focusedBranchId);
 
   if (active && analysis) {
-    const items = analysis.branches;
-    for (let i = items.length - 1; i >= 0; i--) {
-      const b = items[i];
-      if (b.coordinates.length < 2) continue;
-      if (b.id === focusedBranchId) {
-        focusData = {
-          type: 'FeatureCollection',
-          features: [
-            {
-              type: 'Feature',
-              properties: {
-                id: b.id,
-                lineColor: b.color.line,
-                casingColor: b.color.casing,
-              },
-              geometry: {
-                type: 'LineString',
-                coordinates: b.coordinates,
-              },
-            },
-          ],
-        };
-        const first = b.coordinates[0];
-        const last = b.coordinates[b.coordinates.length - 1];
-        focusEndpointsData = {
-          type: 'FeatureCollection',
-          features: [
-            {
-              type: 'Feature',
-              properties: { role: 'split', lineColor: b.color.line, casingColor: b.color.casing },
-              geometry: { type: 'Point', coordinates: first },
-            },
-            {
-              type: 'Feature',
-              properties: { role: 'rejoin', lineColor: b.color.line, casingColor: b.color.casing },
-              geometry: { type: 'Point', coordinates: last },
-            },
-          ],
-        };
-        if (b.replacedBaseCoords.length >= 2) {
-          replacedBaseData = {
+    if (viewMode === 'variants') {
+      const items = analysis.corridors;
+      for (let i = items.length - 1; i >= 0; i--) {
+        const c = items[i];
+        if (c.coordinates.length < 2) continue;
+        if (c.id === focusedBranchId) {
+          focusData = {
             type: 'FeatureCollection',
             features: [
               {
                 type: 'Feature',
-                properties: { id: b.id },
+                properties: {
+                  id: c.id,
+                  lineColor: c.color.line,
+                  casingColor: c.color.casing,
+                },
                 geometry: {
                   type: 'LineString',
-                  coordinates: b.replacedBaseCoords,
+                  coordinates: c.coordinates,
                 },
               },
             ],
           };
+          continue;
         }
-        continue;
+        branchFeatures.push({
+          type: 'Feature',
+          properties: {
+            id: c.id,
+            lineColor: c.color.line,
+            casingColor: c.color.casing,
+            dimmed: hasFocus ? 1 : 0,
+          },
+          geometry: {
+            type: 'LineString',
+            coordinates: c.coordinates,
+          },
+        });
       }
-      branchFeatures.push({
-        type: 'Feature',
-        properties: {
-          id: b.id,
-          lineColor: b.color.line,
-          casingColor: b.color.casing,
-          dimmed: hasFocus ? 1 : 0,
-        },
-        geometry: {
-          type: 'LineString',
-          coordinates: b.coordinates,
-        },
-      });
+    } else {
+      const items = analysis.branches;
+      for (let i = items.length - 1; i >= 0; i--) {
+        const b = items[i];
+        if (b.coordinates.length < 2) continue;
+        if (b.id === focusedBranchId) {
+          focusData = {
+            type: 'FeatureCollection',
+            features: [
+              {
+                type: 'Feature',
+                properties: {
+                  id: b.id,
+                  lineColor: b.color.line,
+                  casingColor: b.color.casing,
+                },
+                geometry: {
+                  type: 'LineString',
+                  coordinates: b.coordinates,
+                },
+              },
+            ],
+          };
+          const first = b.coordinates[0];
+          const last = b.coordinates[b.coordinates.length - 1];
+          focusEndpointsData = {
+            type: 'FeatureCollection',
+            features: [
+              {
+                type: 'Feature',
+                properties: { role: 'split', lineColor: b.color.line, casingColor: b.color.casing },
+                geometry: { type: 'Point', coordinates: first },
+              },
+              {
+                type: 'Feature',
+                properties: { role: 'rejoin', lineColor: b.color.line, casingColor: b.color.casing },
+                geometry: { type: 'Point', coordinates: last },
+              },
+            ],
+          };
+          if (b.replacedBaseCoords.length >= 2) {
+            replacedBaseData = {
+              type: 'FeatureCollection',
+              features: [
+                {
+                  type: 'Feature',
+                  properties: { id: b.id },
+                  geometry: {
+                    type: 'LineString',
+                    coordinates: b.replacedBaseCoords,
+                  },
+                },
+              ],
+            };
+          }
+          continue;
+        }
+        branchFeatures.push({
+          type: 'Feature',
+          properties: {
+            id: b.id,
+            lineColor: b.color.line,
+            casingColor: b.color.casing,
+            dimmed: hasFocus ? 1 : 0,
+          },
+          geometry: {
+            type: 'LineString',
+            coordinates: b.coordinates,
+          },
+        });
+      }
     }
   }
 

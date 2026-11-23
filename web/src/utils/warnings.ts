@@ -722,7 +722,7 @@ export function extractRouteWarnings(
     }
   }
 
-  // Merge adjacent raw warnings of the same kind and prohibition status
+  // 1a. Merge immediately adjacent raw warnings (<= 15 m) of the same kind and prohibition status
   const mergedRaw: RawTagWarning[] = [];
   for (const w of rawWarnings) {
     const prev = mergedRaw[mergedRaw.length - 1];
@@ -737,7 +737,8 @@ export function extractRouteWarnings(
     }
   }
 
-  const items: RouteWarningItem[] = [];
+  // 1b. Filter out short crossings/junctions before grouping longer road corridors
+  const surviving: Array<RawTagWarning & { flaggedLen: number }> = [];
   for (const w of mergedRaw) {
     const len = Math.max(0, Math.round(w.to - w.from));
     // Skip short (< 20 m) footways/crossings so normal road crossings and kerb connectors do not spam warnings
@@ -752,6 +753,33 @@ export function extractRouteWarnings(
     if (w.kind === 'road_tunnel' && !w.isProhibition && len < 50) {
       continue;
     }
+
+    // 1c. Merge consecutive dangerous_road warnings of the same type across gaps up to 500 m
+    // (e.g., short bus lanes or junctions interrupting the same busy arterial road).
+    let mergedIntoExisting = false;
+    if (w.kind === 'dangerous_road' && !w.isProhibition) {
+      for (let k = surviving.length - 1; k >= 0; k--) {
+        const prev = surviving[k];
+        if (w.from - prev.to > 500) break;
+        if (
+          prev.kind === 'dangerous_road' &&
+          !prev.isProhibition &&
+          prev.detail === w.detail
+        ) {
+          prev.to = Math.max(prev.to, w.to);
+          prev.flaggedLen += len;
+          mergedIntoExisting = true;
+          break;
+        }
+      }
+    }
+    if (!mergedIntoExisting) {
+      surviving.push({ ...w, flaggedLen: len });
+    }
+  }
+
+  const items: RouteWarningItem[] = [];
+  for (const w of surviving) {
     const midDist = (w.from + w.to) * 0.5;
     const midPt = pointAtDistance(profile, midDist);
     items.push({
@@ -761,7 +789,7 @@ export function extractRouteWarnings(
       detail: w.detail,
       from: w.from,
       to: w.to,
-      distanceM: Math.max(1, len),
+      distanceM: Math.max(1, w.flaggedLen),
       lon: midPt.lon,
       lat: midPt.lat,
       coordinates: sliceProfileCoords(profile, w.from, w.to),

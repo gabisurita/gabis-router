@@ -62,8 +62,16 @@ import {
   fitCoordinatesBounds,
   type SuggestionDimLevel,
 } from '../utils/map-layers.ts';
-import type { AlternativeBranch, RobustnessAnalysis } from '../utils/robustness.ts';
-import { BranchInspectorPopover } from './BranchInspectorPopover.tsx';
+import type {
+  AlternativeBranch,
+  AlternativeCorridor,
+  RobustnessAnalysis,
+  RobustnessViewMode,
+} from '../utils/robustness.ts';
+import {
+  BranchInspectorPopover,
+  type InspectedRobustnessItem,
+} from './BranchInspectorPopover.tsx';
 import type {
   LibraryRoute,
   MapBoundsBox,
@@ -317,6 +325,7 @@ interface MapViewProps {
   onMapViewportChange?: (bounds: MapBoundsBox, center: { lat: number; lon: number }) => void;
   isRobustnessOpen?: boolean;
   robustnessAnalysis?: RobustnessAnalysis | null;
+  robustnessViewMode?: RobustnessViewMode;
   showStabilityMap?: boolean;
   focusedRobustnessCorridorId?: string | null;
   pinnedRobustnessCorridorId?: string | null;
@@ -325,6 +334,8 @@ interface MapViewProps {
   onTogglePinRobustnessBranch?: (id: string) => void;
   onUseRobustnessBranch?: (branch: AlternativeBranch) => void;
   onCompareRobustnessBranch?: (branch: AlternativeBranch) => void;
+  onUseRobustnessVariant?: (corridor: AlternativeCorridor) => void;
+  onCompareRobustnessVariant?: (corridor: AlternativeCorridor) => void;
 }
 
 export const MapView: React.FC<MapViewProps> = ({
@@ -363,6 +374,7 @@ export const MapView: React.FC<MapViewProps> = ({
   onMapViewportChange,
   isRobustnessOpen = false,
   robustnessAnalysis = null,
+  robustnessViewMode = 'segments',
   showStabilityMap = true,
   focusedRobustnessCorridorId = null,
   pinnedRobustnessCorridorId = null,
@@ -371,6 +383,8 @@ export const MapView: React.FC<MapViewProps> = ({
   onTogglePinRobustnessBranch,
   onUseRobustnessBranch,
   onCompareRobustnessBranch,
+  onUseRobustnessVariant,
+  onCompareRobustnessVariant,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -439,6 +453,8 @@ export const MapView: React.FC<MapViewProps> = ({
   isRobustnessOpenRef.current = isRobustnessOpen;
   const robustnessAnalysisRef = useRef(robustnessAnalysis);
   robustnessAnalysisRef.current = robustnessAnalysis;
+  const robustnessViewModeRef = useRef(robustnessViewMode);
+  robustnessViewModeRef.current = robustnessViewMode;
   const showStabilityMapRef = useRef(showStabilityMap);
   showStabilityMapRef.current = showStabilityMap;
   const focusedRobustnessCorridorIdRef = useRef(focusedRobustnessCorridorId);
@@ -483,6 +499,7 @@ export const MapView: React.FC<MapViewProps> = ({
       robustnessAnalysisRef.current ?? null,
       showStabilityMapRef.current,
       focusedRobustnessCorridorIdRef.current ?? null,
+      robustnessViewModeRef.current,
     );
   }, [segmentHighlight]);
 
@@ -1224,8 +1241,15 @@ export const MapView: React.FC<MapViewProps> = ({
       robustnessAnalysis,
       showStabilityMap,
       focusedRobustnessCorridorId,
+      robustnessViewMode,
     );
-  }, [isRobustnessOpen, robustnessAnalysis, showStabilityMap, focusedRobustnessCorridorId]);
+  }, [
+    isRobustnessOpen,
+    robustnessAnalysis,
+    showStabilityMap,
+    focusedRobustnessCorridorId,
+    robustnessViewMode,
+  ]);
 
   // Fit bounds to a library preview ONLY when explicitly requested via frameLibraryPreviewSeq
   useEffect(() => {
@@ -1586,20 +1610,25 @@ export const MapView: React.FC<MapViewProps> = ({
     }
   }, [hoverPosition]);
 
-  const focusedBranch = useMemo(() => {
+  const inspectedItem = useMemo<InspectedRobustnessItem | null>(() => {
     if (!isRobustnessOpen || !robustnessAnalysis || !focusedRobustnessCorridorId) return null;
-    return robustnessAnalysis.branches.find((b) => b.id === focusedRobustnessCorridorId) ?? null;
-  }, [isRobustnessOpen, robustnessAnalysis, focusedRobustnessCorridorId]);
+    if (robustnessViewMode === 'variants') {
+      const found = robustnessAnalysis.corridors.find((c) => c.id === focusedRobustnessCorridorId);
+      return found ? { kind: 'variant', item: found } : null;
+    }
+    const found = robustnessAnalysis.branches.find((b) => b.id === focusedRobustnessCorridorId);
+    return found ? { kind: 'segment', item: found } : null;
+  }, [isRobustnessOpen, robustnessAnalysis, focusedRobustnessCorridorId, robustnessViewMode]);
 
-  const isFocusedBranchPinned = Boolean(
-    focusedBranch && pinnedRobustnessCorridorId === focusedBranch.id,
+  const isInspectedPinned = Boolean(
+    inspectedItem && pinnedRobustnessCorridorId === inspectedItem.item.id,
   );
 
-  // Project and anchor the floating branch inspector card cleanly inside the map viewport
+  // Project and anchor the floating inspector card cleanly inside the map viewport
   useEffect(() => {
     const map = mapRef.current;
     const container = containerRef.current;
-    if (!map || !container || !focusedBranch) {
+    if (!map || !container || !inspectedItem) {
       setBranchPopoverPos(null);
       setBranchMapLabels([]);
       return;
@@ -1607,9 +1636,9 @@ export const MapView: React.FC<MapViewProps> = ({
 
     const updatePosition = () => {
       const rect = container.getBoundingClientRect();
-      const pt = map.project(focusedBranch.midpoint);
+      const pt = map.project(inspectedItem.item.midpoint);
       const cardW = 316;
-      const cardH = isFocusedBranchPinned ? 270 : 225;
+      const cardH = isInspectedPinned ? 270 : 225;
       const margin = 14;
       const topMin = 62;
       const bottomMax = Math.max(topMin, rect.height - cardH - 140);
@@ -1628,7 +1657,7 @@ export const MapView: React.FC<MapViewProps> = ({
 
     updatePosition();
     if (styleReadyRef.current) {
-      setBranchMapLabels(queryBranchMapLabels(map, focusedBranch.coordinates));
+      setBranchMapLabels(queryBranchMapLabels(map, inspectedItem.item.coordinates));
     } else {
       setBranchMapLabels([]);
     }
@@ -1637,22 +1666,34 @@ export const MapView: React.FC<MapViewProps> = ({
     return () => {
       map.off('move', updatePosition);
     };
-  }, [focusedBranch, isFocusedBranchPinned]);
+  }, [inspectedItem, isInspectedPinned]);
 
   return (
     <>
       <div id="map" ref={containerRef} />
-      {focusedBranch && branchPopoverPos && robustnessAnalysis && (
+      {inspectedItem && branchPopoverPos && robustnessAnalysis && (
         <BranchInspectorPopover
-          branch={focusedBranch}
+          inspected={inspectedItem}
           completedCount={robustnessAnalysis.completedCount}
           mapLabels={branchMapLabels}
           screenPos={branchPopoverPos}
-          isPinned={isFocusedBranchPinned}
+          isPinned={isInspectedPinned}
           canAddCompareSlot={canAddCompareSlot}
-          onUseBranch={(b) => onUseRobustnessBranch?.(b)}
-          onCompareBranch={(b) => onCompareRobustnessBranch?.(b)}
-          onClose={() => onTogglePinRobustnessBranch?.(focusedBranch.id)}
+          onUse={(target) => {
+            if (target.kind === 'segment') {
+              onUseRobustnessBranch?.(target.item);
+            } else {
+              onUseRobustnessVariant?.(target.item);
+            }
+          }}
+          onCompare={(target) => {
+            if (target.kind === 'segment') {
+              onCompareRobustnessBranch?.(target.item);
+            } else {
+              onCompareRobustnessVariant?.(target.item);
+            }
+          }}
+          onClose={() => onTogglePinRobustnessBranch?.(inspectedItem.item.id)}
         />
       )}
     </>

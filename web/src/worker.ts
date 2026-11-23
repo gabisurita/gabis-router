@@ -753,6 +753,8 @@ async function handleMessage(msg: WorkerMessage, customSeq?: number): Promise<vo
                 dimension: probe.dimension,
                 description: probe.description,
                 fullDsl: probe.fullDsl,
+                u: probe.u,
+                norm: probe.norm,
                 axes: probe.axes,
                 baseTemplate: probe.baseTemplate,
                 route: probeRoute,

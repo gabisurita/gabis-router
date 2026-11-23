@@ -16,17 +16,31 @@ import {
 
 export type PerturbationDimension =
   | 'Traffic'
-  | 'Directness'
-  | 'Hills'
-  | 'Surface'
+  | 'Noise'
   | 'Cycleways'
+  | 'Surface'
+  | 'Hills'
+  | 'Directness'
   | 'Scenery';
 
-export type ProbeKind = 'directional' | 'jitter';
+export type PerturbationAxisKey =
+  | 'traffic'
+  | 'hills'
+  | 'surface'
+  | 'turns'
+  | 'crossings'
+  | 'cycleways'
+  | 'greenery'
+  | 'noise'
+  | 'lighting';
+
+export type PerturbationVector = Record<PerturbationAxisKey, number>;
+
+export type ProbeKind = 'sample';
 
 export type ScenarioPresetCount = 20 | 40 | 80 | 160 | 320;
 
-export const DEFAULT_SCENARIO_COUNT: ScenarioPresetCount = 160;
+export const DEFAULT_SCENARIO_COUNT: ScenarioPresetCount = 20;
 
 export interface RobustnessProbeSpec {
   id: string;
@@ -34,6 +48,8 @@ export interface RobustnessProbeSpec {
   label: string;
   dimension: PerturbationDimension;
   description: string;
+  u: PerturbationVector;
+  norm: number;
   fullDsl: string;
   screeningDsl: string;
   axes?: ProfileAxes;
@@ -46,6 +62,8 @@ export interface RobustnessProbeResult {
   label: string;
   dimension: PerturbationDimension;
   description: string;
+  u?: PerturbationVector;
+  norm?: number;
   fullDsl: string;
   axes?: ProfileAxes;
   baseTemplate?: BaseTemplateId;
@@ -62,28 +80,8 @@ export interface StabilitySegmentSpan {
   distanceM: number;
 }
 
-export interface AlternativeCorridor {
-  id: string;
-  label: string;
-  probeLabels: string[];
-  description: string;
-  dimension: PerturbationDimension;
-  probeCount: number;
-  sharePct: number;
-  route: RouteResponse;
-  coordinates: [number, number][];
-  color: { line: string; casing: string };
-  distanceM: number;
-  timeS: number;
-  ascentM: number;
-  deltaDistanceM: number;
-  deltaTimeS: number;
-  deltaAscentM: number;
-  overlapWithBase: number;
-  fullDsl: string;
-  axes?: ProfileAxes;
-  baseTemplate?: BaseTemplateId;
-}
+export type RobustnessViewMode = 'segments' | 'variants';
+export type RobustnessFilterMode = 'frequent' | 'all';
 
 export interface SpanProfileMix {
   hasData: boolean;
@@ -104,6 +102,32 @@ export interface SpanProfileMix {
   dominantRoad: string;
   dominantTraffic: string;
   dominantNoise: string;
+}
+
+export interface AlternativeCorridor {
+  id: string;
+  label: string;
+  probeLabels: string[];
+  description: string;
+  dimension: PerturbationDimension;
+  probeCount: number;
+  sharePct: number;
+  route: RouteResponse;
+  coordinates: [number, number][];
+  midpoint: [number, number];
+  color: { line: string; casing: string };
+  distanceM: number;
+  timeS: number;
+  ascentM: number;
+  deltaDistanceM: number;
+  deltaTimeS: number;
+  deltaAscentM: number;
+  overlapWithBase: number;
+  routeMix: SpanProfileMix;
+  baseMix: SpanProfileMix;
+  fullDsl: string;
+  axes?: ProfileAxes;
+  baseTemplate?: BaseTemplateId;
 }
 
 export interface AlternativeBranch {
@@ -172,55 +196,67 @@ export const ROBUSTNESS_CORRIDOR_COLORS: ReadonlyArray<{ line: string; casing: s
   { line: '#d946ef', casing: '#4a044e' },
 ];
 
-const MAX_DISPLAY_CORRIDORS = 10;
+const MAX_DISPLAY_CORRIDORS = 24;
 const MAX_DISPLAY_BRANCHES = 48;
-const MAX_SINGLE_JITTER_BRANCHES = 6;
+const MAX_SINGLE_HIT_CORRIDORS = 6;
+const MAX_SINGLE_HIT_BRANCHES = 8;
 const MIN_BRANCH_DIST_M = 180;
 const MAX_ON_BASE_BRIDGE_M = 100;
 const BRANCH_MERGE_OVERLAP = 0.72;
 
+const AXIS_KEYS: readonly PerturbationAxisKey[] = [
+  'traffic',
+  'hills',
+  'surface',
+  'turns',
+  'crossings',
+  'cycleways',
+  'greenery',
+  'noise',
+  'lighting',
+] as const;
+
+const AXIS_META: Record<
+  PerturbationAxisKey,
+  { dimension: PerturbationDimension; posTag: string; negTag: string }
+> = {
+  traffic: { dimension: 'Traffic', posTag: 'Quieter traffic', negTag: 'Main roads ok' },
+  noise: { dimension: 'Noise', posTag: 'Lower noise', negTag: 'Noise tolerant' },
+  cycleways: { dimension: 'Cycleways', posTag: 'Bike routes', negTag: 'Free road choice' },
+  surface: { dimension: 'Surface', posTag: 'Smoother tarmac', negTag: 'Off-road / gravel' },
+  hills: { dimension: 'Hills', posTag: 'Flatter', negTag: 'Climbs ok' },
+  turns: { dimension: 'Directness', posTag: 'Fewer turns', negTag: 'Agile turns' },
+  crossings: { dimension: 'Traffic', posTag: 'Safer junctions', negTag: 'Direct crossings' },
+  greenery: { dimension: 'Scenery', posTag: 'Greener / parks', negTag: 'Urban direct' },
+  lighting: { dimension: 'Scenery', posTag: 'Well-lit', negTag: 'Unlit ok' },
+};
+
 const DIMENSION_ORDER: PerturbationDimension[] = [
   'Traffic',
-  'Hills',
-  'Surface',
-  'Directness',
+  'Noise',
   'Cycleways',
+  'Surface',
+  'Hills',
+  'Directness',
   'Scenery',
 ];
 
-const HALTON_PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23] as const;
-
-// Balanced 20-probe core covering all 6 dimensions when scenarioCount < directionalDefs.length.
-const CORE_DIRECTIONAL_IDS = new Set([
-  'traffic-mild-quiet',
-  'traffic-strong-quiet',
-  'traffic-noise-sanctuary',
-  'traffic-relaxed',
-  'cycle-strict-network',
-  'cycle-max-adhesion',
-  'cycle-quiet-network-noise',
-  'cycle-arterial-lanes',
-  'surface-strict-asphalt',
-  'surface-adventure-gravel',
-  'surface-offroad-trails',
-  'scenery-low-noise',
-  'scenery-green-quiet',
-  'scenery-parks-commons',
-  'hills-mild-flat',
-  'hills-strong-flat',
-  'hills-climb-ok',
-  'hills-high-power',
-  'direct-high-flow',
-  'direct-agile',
-  'direct-pure-shortest',
-]);
-
-function selectDirectionalDefs<T extends { id: string }>(defs: T[], scenarioCount: number): T[] {
-  if (scenarioCount >= defs.length) return defs;
-  const core = defs.filter((d) => CORE_DIRECTIONAL_IDS.has(d.id));
-  const extra = defs.filter((d) => !CORE_DIRECTIONAL_IDS.has(d.id));
-  return [...core, ...extra].slice(0, scenarioCount);
-}
+// 9 axis primes + 10th prime for radial perturbation scale, with Cranley-Patterson shifts
+// and a skip offset to avoid initial Halton prime correlation on small sweeps.
+const HALTON_PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29] as const;
+const HALTON_SHIFTS = [
+  0.6180339887,
+  0.2360679775,
+  0.8541019662,
+  0.472135955,
+  0.0901699437,
+  0.7082039325,
+  0.3262379212,
+  0.94427191,
+  0.5623058987,
+  0.1803398875,
+] as const;
+const HALTON_SKIP = 37;
 
 /** Low-discrepancy Halton sequence in (0, 1) for deterministic quasi-Monte-Carlo sampling. */
 export function halton(index: number, base: number): number {
@@ -233,6 +269,35 @@ export function halton(index: number, base: number): number {
     f /= base;
   }
   return result;
+}
+
+/**
+ * Draws sample m >= 1 from a 9D Cranley-Patterson shifted Halton cube scaled by a 10th-prime
+ * radial magnitude in [0.35, 1.0], covering both tight local perturbations and wide exploration.
+ */
+export function samplePerturbationVector(m: number): { u: PerturbationVector; norm: number } {
+  const idx = m + HALTON_SKIP;
+  const radius = 0.35 + 0.65 * ((halton(idx, HALTON_PRIMES[9]) + HALTON_SHIFTS[9]) % 1);
+  const draw = (dim: number) =>
+    (((halton(idx, HALTON_PRIMES[dim]) + HALTON_SHIFTS[dim]) % 1) * 2 - 1) * radius;
+
+  const u: PerturbationVector = {
+    traffic: draw(0),
+    hills: draw(1),
+    surface: draw(2),
+    turns: draw(3),
+    crossings: draw(4),
+    cycleways: draw(5),
+    greenery: draw(6),
+    noise: draw(7),
+    lighting: draw(8),
+  };
+
+  let sumSq = 0;
+  for (const key of AXIS_KEYS) {
+    sumSq += u[key] * u[key];
+  }
+  return { u, norm: Math.sqrt(sumSq) };
 }
 
 function splitBrfContexts(dsl: string): {
@@ -310,700 +375,152 @@ function scaleIntFinite(val: number, factor: number, add = 0, max = 500): number
   return Math.round(clamp(val * factor + add, 0, max));
 }
 
+function dominantAxisOf(u: PerturbationVector): {
+  key: PerturbationAxisKey;
+  dimension: PerturbationDimension;
+  topTag: string;
+  secondTag: string;
+} {
+  const ranked = AXIS_KEYS.map((key) => ({
+    key,
+    val: u[key],
+    mag: Math.abs(u[key]),
+  })).sort((a, b) => b.mag - a.mag);
+
+  const first = ranked[0];
+  const second = ranked[1];
+  const m1 = AXIS_META[first.key];
+  const m2 = AXIS_META[second.key];
+  return {
+    key: first.key,
+    dimension: m1.dimension,
+    topTag: first.val >= 0 ? m1.posTag : m1.negTag,
+    secondTag: second.val >= 0 ? m2.posTag : m2.negTag,
+  };
+}
+
 function buildAxesProbes(
   baseAxes: ProfileAxes,
   baseTemplate: BaseTemplateId,
   profileLabel: string,
   scenarioCount: number,
 ): RobustnessProbeSpec[] {
-  const directionalDefs: Array<{
-    id: string;
-    label: string;
-    dimension: PerturbationDimension;
-    description: string;
-    patch: Partial<ProfileAxes>;
-  }> = [
-    // Traffic & road hierarchy (6)
-    {
-      id: 'traffic-mild-quiet',
-      label: 'Mildly quieter roads',
-      dimension: 'Traffic',
-      description: 'Moderately higher penalties on primary, secondary, and busy roads.',
-      patch: {
-        enableTrafficPenalties: true,
-        primaryCost: scaleFinite(baseAxes.primaryCost, 1.4, 0.5, 20),
-        secondaryCost: scaleFinite(baseAxes.secondaryCost, 1.4, 0.35, 10),
-        tertiaryCost: scaleFinite(baseAxes.tertiaryCost, 1.3, 0.15, 10),
-        trafficClass3Penalty: scaleFinite(baseAxes.trafficClass3Penalty, 1.4, 0.25, 10),
-        trafficClass4Penalty: scaleFinite(baseAxes.trafficClass4Penalty, 1.5, 0.55, 10),
-        trafficClass5Penalty: scaleFinite(baseAxes.trafficClass5Penalty, 1.5, 0.85, 10),
-        trafficClass6Penalty: scaleFinite(baseAxes.trafficClass6Penalty, 1.5, 1.2, 10),
-        trafficClass7Penalty: scaleFinite(baseAxes.trafficClass7Penalty, 1.5, 1.4, 10),
-      },
-    },
-    {
-      id: 'traffic-strong-quiet',
-      label: 'Quiet backroads only',
-      dimension: 'Traffic',
-      description: 'Strong avoidance of main roads and moderate-to-heavy traffic.',
-      patch: {
-        enableTrafficPenalties: true,
-        enableEnvironmentPenalties: true,
-        allowUrbanTrunks: false,
-        primaryCost: scaleFinite(baseAxes.primaryCost, 2.5, 2.5, 20),
-        secondaryCost: scaleFinite(baseAxes.secondaryCost, 2.5, 1.5, 10),
-        tertiaryCost: scaleFinite(baseAxes.tertiaryCost, 2.0, 0.6, 10),
-        trafficClass2Penalty: scaleFinite(baseAxes.trafficClass2Penalty, 1.5, 0.25, 10),
-        trafficClass3Penalty: scaleFinite(baseAxes.trafficClass3Penalty, 2.2, 0.8, 10),
-        trafficClass4Penalty: scaleFinite(baseAxes.trafficClass4Penalty, 2.5, 1.8, 10),
-        trafficClass5Penalty: scaleFinite(baseAxes.trafficClass5Penalty, 2.8, 2.8, 10),
-        trafficClass6Penalty: scaleFinite(baseAxes.trafficClass6Penalty, 3.0, 4.0, 10),
-        trafficClass7Penalty: scaleFinite(baseAxes.trafficClass7Penalty, 3.0, 4.5, 10),
-        multiLanePenalty: scaleFinite(baseAxes.multiLanePenalty, 1.5, 0.8, 10),
-      },
-    },
-    {
-      id: 'traffic-noise-sanctuary',
-      label: 'Strict low traffic and noise',
-      dimension: 'Traffic',
-      description: 'Heavy avoidance of busy traffic classes and loud streets.',
-      patch: {
-        enableTrafficPenalties: true,
-        enableNoisePenalties: true,
-        enableEnvironmentPenalties: true,
-        allowUrbanTrunks: false,
-        primaryCost: scaleFinite(baseAxes.primaryCost, 3.0, 4.0, 20),
-        secondaryCost: scaleFinite(baseAxes.secondaryCost, 3.0, 2.5, 10),
-        tertiaryCost: scaleFinite(baseAxes.tertiaryCost, 2.2, 1.0, 10),
-        trafficClass2Penalty: scaleFinite(baseAxes.trafficClass2Penalty, 1.8, 0.4, 10),
-        trafficClass3Penalty: scaleFinite(baseAxes.trafficClass3Penalty, 2.6, 1.3, 10),
-        trafficClass4Penalty: scaleFinite(baseAxes.trafficClass4Penalty, 3.0, 2.8, 10),
-        trafficClass5Penalty: scaleFinite(baseAxes.trafficClass5Penalty, 3.5, 4.2, 10),
-        trafficClass6Penalty: scaleFinite(baseAxes.trafficClass6Penalty, 3.8, 5.5, 10),
-        trafficClass7Penalty: scaleFinite(baseAxes.trafficClass7Penalty, 4.0, 6.0, 10),
-        noiseClass3Penalty: scaleFinite(baseAxes.noiseClass3Penalty, 2.0, 0.7, 10),
-        noiseClass4Penalty: scaleFinite(baseAxes.noiseClass4Penalty, 2.6, 1.6, 10),
-        noiseClass5Penalty: scaleFinite(baseAxes.noiseClass5Penalty, 3.0, 2.8, 10),
-        noiseClass6Penalty: scaleFinite(baseAxes.noiseClass6Penalty, 3.4, 4.2, 10),
-        multiLanePenalty: scaleFinite(baseAxes.multiLanePenalty, 2.0, 1.2, 10),
-      },
-    },
-    {
-      id: 'traffic-relaxed',
-      label: 'Main-road tolerant',
-      dimension: 'Traffic',
-      description: 'Relaxes penalties on A roads, urban trunks, and heavy traffic classes.',
-      patch: {
-        allowUrbanTrunks: true,
-        allowBusLanes: true,
-        trunkCost: Math.min(baseAxes.trunkCost, 1.5),
-        primaryCost:
-          baseAxes.primaryCost >= 9999 ? 0.8 : Number((baseAxes.primaryCost * 0.25).toFixed(2)),
-        secondaryCost:
-          baseAxes.secondaryCost >= 9999 ? 0.5 : Number((baseAxes.secondaryCost * 0.25).toFixed(2)),
-        tertiaryCost: Number((baseAxes.tertiaryCost * 0.25).toFixed(2)),
-        trafficClass3Penalty: Number((baseAxes.trafficClass3Penalty * 0.25).toFixed(2)),
-        trafficClass4Penalty: Number((baseAxes.trafficClass4Penalty * 0.25).toFixed(2)),
-        trafficClass5Penalty: Number((baseAxes.trafficClass5Penalty * 0.25).toFixed(2)),
-        trafficClass6Penalty: Number((baseAxes.trafficClass6Penalty * 0.25).toFixed(2)),
-        trafficClass7Penalty: Number((baseAxes.trafficClass7Penalty * 0.2).toFixed(2)),
-      },
-    },
-    {
-      id: 'traffic-no-multilane',
-      label: 'Avoid multi-lane and tunnels',
-      dimension: 'Traffic',
-      description: 'Penalizes multi-lane roads and motor-road tunnels.',
-      patch: {
-        enableEnvironmentPenalties: true,
-        multiLanePenalty: scaleFinite(baseAxes.multiLanePenalty, 2.0, 1.5, 10),
-        roadTunnelPenalty: scaleFinite(baseAxes.roadTunnelPenalty, 2.0, 4.0, 20),
-      },
-    },
-    {
-      id: 'junction-safe',
-      label: 'Strict junction safety',
-      dimension: 'Traffic',
-      description: 'Heavy penalties on uncontrolled busy crossings and turns across traffic.',
-      patch: {
-        enableTurnPenalties: true,
-        crossingClass3Cost: scaleIntFinite(baseAxes.crossingClass3Cost, 1.8, 50, 500),
-        crossingClass4Cost: scaleIntFinite(baseAxes.crossingClass4Cost, 2.0, 90, 500),
-        crossingClass5Cost: scaleIntFinite(baseAxes.crossingClass5Cost, 2.0, 140, 500),
-        turnAcrossTrafficClass3Cost: scaleIntFinite(baseAxes.turnAcrossTrafficClass3Cost, 1.8, 50, 500),
-        turnAcrossTrafficClass4Cost: scaleIntFinite(baseAxes.turnAcrossTrafficClass4Cost, 2.0, 90, 500),
-        turnAcrossTrafficClass5Cost: scaleIntFinite(baseAxes.turnAcrossTrafficClass5Cost, 2.0, 130, 500),
-      },
-    },
+  const probes: RobustnessProbeSpec[] = [];
+  const lnSpan = Math.log(2.8); // ~[0.36x, 2.80x] standard multiplicative span
+  const lnHighUp = Math.log(4.8); // stronger upward sweep on traffic, noise, and cycle adhesion
+  const lnRoughDown = Math.log(7.5); // strong relaxation on unpaved/trail axes when u.surface < 0
 
-    // Directness & turns (3)
-    {
-      id: 'direct-high-flow',
-      label: 'Fast and direct',
-      dimension: 'Directness',
-      description: 'Fewer turns and traffic lights, willing to stay on direct arterial roads.',
-      patch: {
-        allowUrbanTrunks: true,
-        allowBusLanes: true,
-        primaryCost:
-          baseAxes.primaryCost >= 9999 ? 1.0 : Number((baseAxes.primaryCost * 0.3).toFixed(2)),
-        secondaryCost:
-          baseAxes.secondaryCost >= 9999 ? 0.5 : Number((baseAxes.secondaryCost * 0.3).toFixed(2)),
-        trafficClass5Penalty: Number((baseAxes.trafficClass5Penalty * 0.35).toFixed(2)),
-        trafficClass6Penalty: Number((baseAxes.trafficClass6Penalty * 0.35).toFixed(2)),
-        trafficClass7Penalty: Number((baseAxes.trafficClass7Penalty * 0.3).toFixed(2)),
-        nonCycleRouteRoadPenalty: 0,
-        enableTurnPenalties: true,
-        turnCostGeneric: clamp(Math.round(Math.max(200, baseAxes.turnCostGeneric * 1.7)), 0, 300),
-        trafficSignalCost: clamp(Math.round(Math.max(130, baseAxes.trafficSignalCost * 1.8)), 0, 300),
-        stopGiveWayCost: clamp(Math.round(Math.max(130, baseAxes.stopGiveWayCost * 1.6)), 0, 300),
-      },
-    },
-    {
-      id: 'direct-low-turn',
-      label: 'Minimal turns',
-      dimension: 'Directness',
-      description: 'Penalizes sharp turns, stop signs, and road-class transitions.',
-      patch: {
-        enableTurnPenalties: true,
-        turnCostGeneric: clamp(Math.round(Math.max(220, baseAxes.turnCostGeneric * 1.9)), 0, 300),
-        turnCostCycleRoute: clamp(Math.round(Math.max(170, baseAxes.turnCostCycleRoute * 1.8)), 0, 300),
-        roadTransitionCost: clamp(Math.round(Math.max(90, baseAxes.roadTransitionCost * 2.0 + 40)), 0, 300),
-      },
-    },
-    {
-      id: 'direct-agile',
-      label: 'Agile backstreets',
-      dimension: 'Directness',
-      description: 'Low turn and stop penalties so quiet backstreet shortcuts open up.',
-      patch: {
-        enableTurnPenalties: true,
-        turnCostGeneric: Math.round(baseAxes.turnCostGeneric * 0.25),
-        turnCostCycleRoute: Math.round(baseAxes.turnCostCycleRoute * 0.25),
-        trafficSignalCost: Math.round(baseAxes.trafficSignalCost * 0.35),
-        stopGiveWayCost: Math.round(baseAxes.stopGiveWayCost * 0.25),
-        roadTransitionCost: 0,
-      },
-    },
-    {
-      id: 'direct-pure-shortest',
-      label: 'Shortest legal distance',
-      dimension: 'Directness',
-      description: 'Minimizes distance by stripping soft comfort, turn, and climb biases.',
-      patch: {
-        stickToCycleRoutes: false,
-        nonCycleRouteRoadPenalty: 0,
-        considerElevation: false,
-        uphillCost: 0,
-        downhillCost: 0,
-        enableTurnPenalties: true,
-        turnCostGeneric: 15,
-        turnCostCycleRoute: 10,
-        trafficSignalCost: 10,
-        stopGiveWayCost: 5,
-        roadTransitionCost: 0,
-        forestUntaggedPenalty: 0,
-        noiseClass4Penalty: 0,
-        noiseClass5Penalty: 0,
-        noiseClass6Penalty: 0,
-        trafficClass3Penalty: Math.min(baseAxes.trafficClass3Penalty, 0.1),
-        trafficClass4Penalty: Math.min(baseAxes.trafficClass4Penalty, 0.2),
-      },
-    },
+  for (let m = 1; m <= scenarioCount; m++) {
+    const { u, norm } = samplePerturbationVector(m);
 
-    // Hills & climbing (4)
-    {
-      id: 'hills-mild-flat',
-      label: 'Mildly flatter',
-      dimension: 'Hills',
-      description: 'Moderately higher climb penalty.',
-      patch: {
-        considerElevation: true,
-        uphillCost: clamp(Math.round(baseAxes.uphillCost * 1.6 + 40), 0, 200),
-        uphillCutoff: Number(Math.min(baseAxes.uphillCutoff, 1.3).toFixed(1)),
-        downhillCost: clamp(Math.round(baseAxes.downhillCost * 1.3 + 20), 0, 200),
-      },
-    },
-    {
-      id: 'hills-strong-flat',
-      label: 'Flattest route',
-      dimension: 'Hills',
-      description: 'Strong climb avoidance with a low gradient threshold.',
-      patch: {
-        considerElevation: true,
-        uphillCost: clamp(Math.round(Math.max(150, baseAxes.uphillCost * 2.5 + 90)), 0, 200),
-        uphillCutoff: Number(Math.min(baseAxes.uphillCutoff, 0.8).toFixed(1)),
-        downhillCost: clamp(Math.round(Math.max(75, baseAxes.downhillCost * 1.8 + 40)), 0, 200),
-      },
-    },
-    baseAxes.uphillCost >= 20
-      ? {
-          id: 'hills-climb-ok',
-          label: 'Climb-tolerant',
-          dimension: 'Hills',
-          description: 'Accepts steeper hills whenever they shorten the ride.',
-          patch: {
-            considerElevation: true,
-            uphillCost: Math.round(baseAxes.uphillCost * 0.15),
-            uphillCutoff: 3.8,
-            downhillCost: Math.round(baseAxes.downhillCost * 0.25),
-          },
-        }
-      : {
-          id: 'hills-high-power',
-          label: 'Strong climber',
-          dimension: 'Hills',
-          description: 'Higher rider power and relaxed slope cutoffs.',
-          patch: {
-            considerElevation: false,
-            uphillCost: 0,
-            downhillCost: 0,
-            bikerPower: clamp(Math.round(baseAxes.bikerPower * 1.7), 50, 350),
-          },
-        },
-    {
-      id: 'hills-gentle-descents',
-      label: 'Cautious descents',
-      dimension: 'Hills',
-      description: 'Avoids steep descents and fast downhill braking zones.',
-      patch: {
-        considerElevation: true,
-        downhillCost: clamp(Math.round(Math.max(120, baseAxes.downhillCost * 2.5 + 80)), 0, 200),
-        downhillCutoff: 1.0,
-      },
-    },
+    const kTraffic = u.traffic >= 0 ? Math.exp(u.traffic * lnHighUp) : Math.exp(u.traffic * lnSpan);
+    const kHills = Math.exp(u.hills * lnSpan);
+    const kSurface =
+      u.surface >= 0 ? Math.exp(u.surface * lnSpan) : Math.exp(u.surface * lnRoughDown);
+    const kPathGate = u.surface >= 0 ? kSurface : kSurface * 0.5;
+    const kTurns = Math.exp(u.turns * lnSpan);
+    const kCross = Math.exp(u.crossings * lnSpan);
+    const kCycle = u.cycleways >= 0 ? Math.exp(u.cycleways * lnHighUp) : Math.exp(u.cycleways * lnSpan);
+    const kScenery = Math.exp(u.greenery * lnSpan);
+    const kNoise = u.noise >= 0 ? Math.exp(u.noise * lnHighUp) : Math.exp(u.noise * lnSpan);
+    const kEnv = Math.exp(u.lighting * lnSpan);
 
-    // Surface quality & off-road trails (4)
-    {
-      id: 'surface-strict-asphalt',
-      label: 'Strict smooth asphalt',
-      dimension: 'Surface',
-      description: 'Avoids gravel, cobbles, sett, paving stones, and untagged paths.',
-      patch: {
-        enableSurfacePenalties: true,
-        pavingStonesPenalty: scaleFinite(baseAxes.pavingStonesPenalty, 2.0, 1.5, 15),
-        settPenalty: scaleFinite(baseAxes.settPenalty, 2.0, 3.0, 15),
-        cobblestonePenalty: scaleFinite(baseAxes.cobblestonePenalty, 2.0, 5.0, 15),
-        compactedPenalty: scaleFinite(baseAxes.compactedPenalty, 2.5, 3.5, 15),
-        fineGravelPenalty: scaleFinite(baseAxes.fineGravelPenalty, 2.5, 4.5, 15),
-        gravelPenalty: scaleFinite(baseAxes.gravelPenalty, 2.5, 7.0, 15),
-        unpavedPenalty: scaleFinite(baseAxes.unpavedPenalty, 2.0, 7.0, 15),
-        untaggedPathSurfacePenalty: scaleFinite(baseAxes.untaggedPathSurfacePenalty, 2.0, 3.0, 15),
-      },
-    },
-    {
-      id: 'surface-light-gravel',
-      label: 'Towpaths and compacted',
-      dimension: 'Surface',
-      description: 'Welcomes compacted gravel, canal towpaths, park gates, and smooth tracks.',
-      patch: {
-        enableSurfacePenalties: true,
-        compactedPenalty: Math.min(baseAxes.compactedPenalty, 0.08),
-        fineGravelPenalty: Math.min(baseAxes.fineGravelPenalty, 0.18),
-        untaggedPathSurfacePenalty: Math.min(baseAxes.untaggedPathSurfacePenalty, 0.3),
-        cyclewaySharedCost: Math.min(baseAxes.cyclewaySharedCost, 0.15),
-        pathCost: Math.min(baseAxes.pathCost, 0.45),
-        footwayCost: Math.min(baseAxes.footwayCost, 0.5),
-        pedestrianCost: Math.min(baseAxes.pedestrianCost, 0.55),
-        bridlewayCost: Math.min(baseAxes.bridlewayCost, 0.3),
-        trackGrade1Cost: Math.min(baseAxes.trackGrade1Cost, 0.1),
-        trackGrade2Cost: Math.min(baseAxes.trackGrade2Cost, 0.25),
-        trackUntaggedCost: Math.min(baseAxes.trackUntaggedCost, 0.25),
-      },
-    },
-    {
-      id: 'surface-adventure-gravel',
-      label: 'Gravel and bridleways',
-      dimension: 'Surface',
-      description: 'Opens up gravel tracks, bridleways, commons, and unpaved trails.',
-      patch: {
-        enableSurfacePenalties: true,
-        compactedPenalty: 0.0,
-        fineGravelPenalty: 0.0,
-        gravelPenalty: Math.min(baseAxes.gravelPenalty, 0.15),
-        pebblestonePenalty: Math.min(baseAxes.pebblestonePenalty, 0.3),
-        unpavedPenalty: Math.min(baseAxes.unpavedPenalty, 0.15),
-        grassPenalty: Math.min(baseAxes.grassPenalty, 0.8),
-        untaggedPathSurfacePenalty: Math.min(baseAxes.untaggedPathSurfacePenalty, 0.15),
-        cyclewaySharedCost: Math.min(baseAxes.cyclewaySharedCost, 0.1),
-        bridlewayCost: Math.min(baseAxes.bridlewayCost, 0.05),
-        pathCost: Math.min(baseAxes.pathCost, 0.2),
-        footwayCost: Math.min(baseAxes.footwayCost, 0.45),
-        pedestrianCost: Math.min(baseAxes.pedestrianCost, 0.45),
-        trackGrade1Cost: 0.0,
-        trackGrade2Cost: 0.05,
-        trackGrade3Cost: Math.min(baseAxes.trackGrade3Cost, 0.25),
-        trackGrade4Cost: Math.min(baseAxes.trackGrade4Cost, 1.2),
-        trackUntaggedCost: Math.min(baseAxes.trackUntaggedCost, 0.1),
-      },
-    },
-    {
-      id: 'surface-offroad-trails',
-      label: 'Off-road gravel and commons',
-      dimension: 'Surface',
-      description: 'Actively prefers gravel, commons, and bridleways over tarmac streets.',
-      patch: {
-        enableSurfacePenalties: true,
-        asphaltPenalty: Math.max(baseAxes.asphaltPenalty, 0.65),
-        pavedPenalty: Math.max(baseAxes.pavedPenalty, 0.55),
-        concretePenalty: Math.max(baseAxes.concretePenalty, 0.55),
-        untaggedRoadSurfacePenalty: Math.max(baseAxes.untaggedRoadSurfacePenalty, 0.55),
-        residentialCost: Math.max(baseAxes.residentialCost, 0.75),
-        unclassifiedCost: Math.max(baseAxes.unclassifiedCost, 0.65),
-        tertiaryCost: Math.max(baseAxes.tertiaryCost, 0.75),
-        secondaryCost: scaleFinite(baseAxes.secondaryCost, 1.4, 0.8, 10),
-        primaryCost: scaleFinite(baseAxes.primaryCost, 1.5, 1.2, 20),
-        compactedPenalty: 0.0,
-        fineGravelPenalty: 0.0,
-        gravelPenalty: 0.05,
-        pebblestonePenalty: 0.2,
-        unpavedPenalty: 0.05,
-        grassPenalty: 0.45,
-        untaggedPathSurfacePenalty: 0.05,
-        cyclewayCost: 0.0,
-        cyclewaySharedCost: 0.0,
-        bridlewayCost: 0.0,
-        pathCost: 0.1,
-        footwayCost: Math.min(baseAxes.footwayCost, 0.35),
-        pedestrianCost: Math.min(baseAxes.pedestrianCost, 0.35),
-        trackGrade1Cost: 0.0,
-        trackGrade2Cost: 0.0,
-        trackGrade3Cost: 0.15,
-        trackGrade4Cost: 0.75,
-        trackUntaggedCost: 0.05,
-      },
-    },
+    const tPos = Math.max(0, u.traffic);
+    const nPos = Math.max(0, u.noise);
+    const cPos = Math.max(0, u.cycleways);
 
-    // Cycleways & networks (6)
-    {
-      id: 'cycle-strict-network',
-      label: 'Quiet cycle networks',
-      dimension: 'Cycleways',
-      description: 'Strong pull toward signed cycle routes and protected cycleways.',
-      patch: {
-        stickToCycleRoutes: true,
-        nonCycleRouteRoadPenalty: clamp(
-          Number(Math.max(1.8, baseAxes.nonCycleRouteRoadPenalty * 3.0 + 1.2).toFixed(2)),
-          0,
-          5,
-        ),
-        cyclewayCost: 0.0,
-        cyclewaySharedCost: Math.min(baseAxes.cyclewaySharedCost, 0.1),
-        turnCostCycleRoute: Math.min(baseAxes.turnCostCycleRoute, 30),
-      },
-    },
-    {
-      id: 'cycle-max-adhesion',
-      label: 'Strict bike-route adhesion',
-      dimension: 'Cycleways',
-      description: 'Very strong pull to stay on signed LCN, RCN, NCN, and dedicated cycleways.',
-      patch: {
-        stickToCycleRoutes: true,
-        nonCycleRouteRoadPenalty: clamp(
-          Number(Math.max(3.2, baseAxes.nonCycleRouteRoadPenalty * 5.0 + 2.0).toFixed(2)),
-          0,
-          5,
-        ),
-        cyclewayCost: 0.0,
-        cyclewaySharedCost: 0.0,
-        turnCostCycleRoute: Math.min(baseAxes.turnCostCycleRoute, 20),
-      },
-    },
-    {
-      id: 'cycle-quiet-network-noise',
-      label: 'Quiet signed bike routes',
-      dimension: 'Cycleways',
-      description: 'Combines high bike-route adhesion with strong traffic and noise avoidance.',
-      patch: {
-        stickToCycleRoutes: true,
-        allowUrbanTrunks: false,
-        nonCycleRouteRoadPenalty: clamp(
-          Number(Math.max(2.4, baseAxes.nonCycleRouteRoadPenalty * 4.0 + 1.4).toFixed(2)),
-          0,
-          5,
-        ),
-        cyclewayCost: 0.0,
-        cyclewaySharedCost: Math.min(baseAxes.cyclewaySharedCost, 0.1),
-        turnCostCycleRoute: Math.min(baseAxes.turnCostCycleRoute, 25),
-        enableTrafficPenalties: true,
-        trafficClass3Penalty: scaleFinite(baseAxes.trafficClass3Penalty, 1.8, 0.6, 10),
-        trafficClass4Penalty: scaleFinite(baseAxes.trafficClass4Penalty, 2.2, 1.4, 10),
-        trafficClass5Penalty: scaleFinite(baseAxes.trafficClass5Penalty, 2.4, 2.2, 10),
-        trafficClass6Penalty: scaleFinite(baseAxes.trafficClass6Penalty, 2.6, 3.2, 10),
-        trafficClass7Penalty: scaleFinite(baseAxes.trafficClass7Penalty, 2.6, 3.6, 10),
-        enableNoisePenalties: true,
-        noiseClass3Penalty: scaleFinite(baseAxes.noiseClass3Penalty, 1.6, 0.4, 10),
-        noiseClass4Penalty: scaleFinite(baseAxes.noiseClass4Penalty, 2.2, 1.2, 10),
-        noiseClass5Penalty: scaleFinite(baseAxes.noiseClass5Penalty, 2.5, 2.0, 10),
-        noiseClass6Penalty: scaleFinite(baseAxes.noiseClass6Penalty, 2.8, 3.0, 10),
-      },
-    },
-    {
-      id: 'cycle-arterial-lanes',
-      label: 'Arterial cycle superhighways',
-      dimension: 'Cycleways',
-      description: 'Follows direct signed cycle superhighways, urban trunks, and bus lanes.',
-      patch: {
-        stickToCycleRoutes: true,
-        nonCycleRouteRoadPenalty: clamp(
-          Number(Math.max(1.8, baseAxes.nonCycleRouteRoadPenalty + 1.4).toFixed(2)),
-          0,
-          5,
-        ),
-        allowUrbanTrunks: true,
-        allowBusLanes: true,
-        useProposedCycleRoutes: true,
-        trunkCost: Math.min(baseAxes.trunkCost, 1.0),
-        primaryCost: Math.min(baseAxes.primaryCost, 0.1),
-        secondaryCost: Math.min(baseAxes.secondaryCost, 0.1),
-        cyclewayCost: 0.0,
-        trafficClass4Penalty: Math.min(baseAxes.trafficClass4Penalty, 0.1),
-        trafficClass5Penalty: Math.min(baseAxes.trafficClass5Penalty, 0.15),
-        trafficClass6Penalty: Math.min(baseAxes.trafficClass6Penalty, 0.2),
-        trafficClass7Penalty: Math.min(baseAxes.trafficClass7Penalty, 0.2),
-      },
-    },
-    {
-      id: 'cycle-shared-paths',
-      label: 'Shared paths and plazas',
-      dimension: 'Cycleways',
-      description: 'Welcomes shared-use cycleways, pedestrian plazas, park gates, and proposed routes.',
-      patch: {
-        stickToCycleRoutes: true,
-        useProposedCycleRoutes: true,
-        cyclewayCost: 0.0,
-        cyclewaySharedCost: 0.0,
-        pedestrianCost: Math.min(baseAxes.pedestrianCost, 0.2),
-        footwayCost: Math.min(baseAxes.footwayCost, 0.35),
-        pathCost: Math.min(baseAxes.pathCost, 0.35),
-        dismountNodeCost: Math.round(baseAxes.dismountNodeCost * 0.25),
-      },
-    },
-    {
-      id: 'cycle-unbiased',
-      label: 'Unbiased road choice',
-      dimension: 'Cycleways',
-      description: 'Evaluates streets purely on road, traffic, and surface tags without cycle-route bias.',
-      patch: {
-        stickToCycleRoutes: false,
-        nonCycleRouteRoadPenalty: 0.0,
-        useProposedCycleRoutes: true,
-        allowBusLanes: true,
-      },
-    },
-
-    // Scenery, noise & lighting (4)
-    {
-      id: 'scenery-low-noise',
-      label: 'Lowest noise streets',
-      dimension: 'Scenery',
-      description: 'Strong avoidance of moderate-to-extreme traffic noise independent of parks.',
-      patch: {
-        enableNoisePenalties: true,
-        noiseClass2Penalty: scaleFinite(baseAxes.noiseClass2Penalty, 1.5, 0.2, 10),
-        noiseClass3Penalty: scaleFinite(baseAxes.noiseClass3Penalty, 2.0, 0.7, 10),
-        noiseClass4Penalty: scaleFinite(baseAxes.noiseClass4Penalty, 2.6, 1.6, 10),
-        noiseClass5Penalty: scaleFinite(baseAxes.noiseClass5Penalty, 3.0, 2.8, 10),
-        noiseClass6Penalty: scaleFinite(baseAxes.noiseClass6Penalty, 3.4, 4.2, 10),
-      },
-    },
-    {
-      id: 'scenery-green-quiet',
-      label: 'Green streets and low noise',
-      dimension: 'Scenery',
-      description: 'Prefers tree-lined streets, low traffic noise, and wooded corridors.',
-      patch: {
-        enableForestPenalties: true,
-        forestUntaggedPenalty: Math.max(baseAxes.forestUntaggedPenalty, 0.9),
-        forestClass1Penalty: Math.max(baseAxes.forestClass1Penalty, 0.6),
-        forestClass2Penalty: Math.max(baseAxes.forestClass2Penalty, 0.35),
-        enableNoisePenalties: true,
-        noiseClass3Penalty: scaleFinite(baseAxes.noiseClass3Penalty, 1.6, 0.35, 10),
-        noiseClass4Penalty: scaleFinite(baseAxes.noiseClass4Penalty, 2.2, 1.1, 10),
-        noiseClass5Penalty: scaleFinite(baseAxes.noiseClass5Penalty, 2.5, 1.9, 10),
-        noiseClass6Penalty: scaleFinite(baseAxes.noiseClass6Penalty, 2.8, 2.8, 10),
-      },
-    },
-    {
-      id: 'scenery-parks-commons',
-      label: 'Parks, commons, and greenways',
-      dimension: 'Scenery',
-      description: 'Seeks parks, commons, heaths, and wooded trails even on unpaved park paths.',
-      patch: {
-        enableForestPenalties: true,
-        forestUntaggedPenalty: Math.max(baseAxes.forestUntaggedPenalty, 1.4),
-        forestClass1Penalty: Math.max(baseAxes.forestClass1Penalty, 1.0),
-        forestClass2Penalty: Math.max(baseAxes.forestClass2Penalty, 0.6),
-        forestClass3Penalty: Math.max(baseAxes.forestClass3Penalty, 0.25),
-        enableNoisePenalties: true,
-        noiseClass4Penalty: scaleFinite(baseAxes.noiseClass4Penalty, 1.8, 0.6, 10),
-        noiseClass5Penalty: scaleFinite(baseAxes.noiseClass5Penalty, 2.0, 1.1, 10),
-        noiseClass6Penalty: scaleFinite(baseAxes.noiseClass6Penalty, 2.2, 1.6, 10),
-        enableSurfacePenalties: true,
-        compactedPenalty: Math.min(baseAxes.compactedPenalty, 0.0),
-        fineGravelPenalty: Math.min(baseAxes.fineGravelPenalty, 0.05),
-        gravelPenalty: Math.min(baseAxes.gravelPenalty, 0.15),
-        unpavedPenalty: Math.min(baseAxes.unpavedPenalty, 0.15),
-        grassPenalty: Math.min(baseAxes.grassPenalty, 0.6),
-        untaggedPathSurfacePenalty: Math.min(baseAxes.untaggedPathSurfacePenalty, 0.15),
-        cyclewayCost: 0.0,
-        cyclewaySharedCost: Math.min(baseAxes.cyclewaySharedCost, 0.05),
-        bridlewayCost: Math.min(baseAxes.bridlewayCost, 0.05),
-        pathCost: Math.min(baseAxes.pathCost, 0.2),
-        footwayCost: Math.min(baseAxes.footwayCost, 0.4),
-        pedestrianCost: Math.min(baseAxes.pedestrianCost, 0.4),
-        trackGrade1Cost: 0.0,
-        trackGrade2Cost: Math.min(baseAxes.trackGrade2Cost, 0.1),
-        trackUntaggedCost: Math.min(baseAxes.trackUntaggedCost, 0.1),
-      },
-    },
-    {
-      id: 'scenery-well-lit',
-      label: 'Well-lit streets',
-      dimension: 'Scenery',
-      description: 'Avoids unlit paths and dark rural lanes.',
-      patch: {
-        enableEnvironmentPenalties: true,
-        unlitPenalty: scaleFinite(baseAxes.unlitPenalty, 2.0, 1.6, 10),
-        untaggedLitPenalty: scaleFinite(baseAxes.untaggedLitPenalty, 1.8, 0.45, 10),
-      },
-    },
-  ];
-
-  const probes: RobustnessProbeSpec[] = selectDirectionalDefs(directionalDefs, scenarioCount).map(
-    (s) => {
-      const nextAxes: ProfileAxes = { ...baseAxes, ...s.patch };
-      const fullDsl = generateBrfFromAxes(nextAxes, {
-        name: `${profileLabel} (${s.label})`,
-        summary: s.description,
-      });
-      return {
-        id: s.id,
-        kind: 'directional',
-        label: s.label,
-        dimension: s.dimension,
-        description: s.description,
-        fullDsl,
-        screeningDsl: injectScreeningPass2(fullDsl),
-        axes: nextAxes,
-        baseTemplate,
-      };
-    });
-
-  // Deterministic Halton quasi-Monte-Carlo multi-axis perturbations
-  const jitterCount = Math.max(0, scenarioCount - probes.length);
-  const lnSpan = Math.log(2.6); // ~[0.38x, 2.60x] standard multiplicative span
-  const lnHighUp = Math.log(4.5); // stronger upward sweep (up to 4.5x) on traffic, noise, and cycle adhesion
-  const lnRoughDown = Math.log(6.5); // stronger relaxation toward 0.15x on unpaved/trail axes when uSurface < 0
-
-  for (let m = 1; m <= jitterCount; m++) {
-    const uTraffic = halton(m, HALTON_PRIMES[0]) * 2 - 1; // [-1, 1]
-    const uHills = halton(m, HALTON_PRIMES[1]) * 2 - 1;
-    const uSurface = halton(m, HALTON_PRIMES[2]) * 2 - 1;
-    const uTurns = halton(m, HALTON_PRIMES[3]) * 2 - 1;
-    const uCross = halton(m, HALTON_PRIMES[4]) * 2 - 1;
-    const uCycle = halton(m, HALTON_PRIMES[5]) * 2 - 1;
-    const uScenery = halton(m, HALTON_PRIMES[6]) * 2 - 1;
-    const uNoise = halton(m, HALTON_PRIMES[7]) * 2 - 1;
-    const uEnv = halton(m, HALTON_PRIMES[8]) * 2 - 1;
-
-    const kTraffic = uTraffic >= 0 ? Math.exp(uTraffic * lnHighUp) : Math.exp(uTraffic * lnSpan);
-    const kHills = Math.exp(uHills * lnSpan);
-    const kSurface = uSurface >= 0 ? Math.exp(uSurface * lnSpan) : Math.exp(uSurface * lnRoughDown);
-    const kPathGate = uSurface >= 0 ? kSurface : kSurface * 0.6;
-    const kTurns = Math.exp(uTurns * lnSpan);
-    const kCross = Math.exp(uCross * lnSpan);
-    const kCycle = uCycle >= 0 ? Math.exp(uCycle * lnHighUp) : Math.exp(uCycle * lnSpan);
-    const kScenery = Math.exp(uScenery * lnSpan);
-    const kNoise = uNoise >= 0 ? Math.exp(uNoise * lnHighUp) : Math.exp(uNoise * lnSpan);
-    const kEnv = Math.exp(uEnv * lnSpan);
-
-    const tPos = Math.max(0, uTraffic);
-    const nPos = Math.max(0, uNoise);
-    const cPos = Math.max(0, uCycle);
-
-    const hillAdd = uHills > 0.2 && baseAxes.uphillCost < 20 ? Math.round(uHills * 55) : 0;
-    const greenAdd = uScenery > 0.2 ? Number(((uScenery - 0.2) * 1.05).toFixed(2)) : 0;
-    const tarmacBias = uSurface < -0.35 ? Number(((-uSurface - 0.35) * 0.85).toFixed(2)) : 0;
-    const roughAdd = uSurface > 0.35 ? Number(((uSurface - 0.35) * 0.8).toFixed(2)) : 0;
+    const hillAdd = u.hills > 0.15 && baseAxes.uphillCost < 25 ? Math.round(u.hills * 75) : 0;
+    const greenAdd = u.greenery > 0.15 ? Number(((u.greenery - 0.15) * 1.25).toFixed(2)) : 0;
+    const tarmacBias = u.surface < -0.3 ? Number(((-u.surface - 0.3) * 0.95).toFixed(2)) : 0;
+    const roughAdd = u.surface > 0.3 ? Number(((u.surface - 0.3) * 0.9).toFixed(2)) : 0;
 
     const baseTurnCycle = scaleIntFinite(baseAxes.turnCostCycleRoute, kTurns, 0, 300);
 
     const nextAxes: ProfileAxes = {
       ...baseAxes,
       enableTrafficPenalties: baseAxes.enableTrafficPenalties || tPos > 0.15,
-      allowUrbanTrunks: uTraffic < -0.15 ? true : uTraffic > 0.25 ? false : baseAxes.allowUrbanTrunks,
-      allowBusLanes: uCycle > 0.2 || uTraffic < -0.15 ? true : baseAxes.allowBusLanes,
-      useProposedCycleRoutes: uCycle > 0.2 ? true : baseAxes.useProposedCycleRoutes,
+      allowUrbanTrunks:
+        u.traffic < -0.15 ? true : u.traffic > 0.25 ? false : baseAxes.allowUrbanTrunks,
+      allowBusLanes: u.cycleways > 0.2 || u.traffic < -0.15 ? true : baseAxes.allowBusLanes,
+      useProposedCycleRoutes: u.cycleways > 0.2 ? true : baseAxes.useProposedCycleRoutes,
       stickToCycleRoutes:
-        uCycle < -0.55 ? false : uCycle > 0.1 ? true : baseAxes.stickToCycleRoutes,
+        u.cycleways < -0.5 ? false : u.cycleways > 0.1 ? true : baseAxes.stickToCycleRoutes,
 
+      trunkCost:
+        u.traffic < -0.35
+          ? Math.min(baseAxes.trunkCost, 1.5)
+          : baseAxes.trunkCost,
       primaryCost: scaleFinite(
         baseAxes.primaryCost,
         kTraffic,
-        tPos > 0.15 ? (tPos - 0.15) * 2.4 : tarmacBias * 0.5,
+        tPos > 0.15 ? (tPos - 0.15) * 2.6 : tarmacBias * 0.5,
         20,
       ),
       secondaryCost: scaleFinite(
         baseAxes.secondaryCost,
         kTraffic,
-        tPos > 0.15 ? (tPos - 0.15) * 1.5 : tarmacBias * 0.4,
+        tPos > 0.15 ? (tPos - 0.15) * 1.6 : tarmacBias * 0.4,
         10,
       ),
       tertiaryCost: scaleFinite(
         baseAxes.tertiaryCost,
         kTraffic,
-        tPos > 0.25 ? (tPos - 0.25) * 0.7 : tarmacBias * 0.5,
+        tPos > 0.25 ? (tPos - 0.25) * 0.8 : tarmacBias * 0.5,
         10,
       ),
       unclassifiedCost: scaleFinite(baseAxes.unclassifiedCost, 1, tarmacBias * 0.6, 10),
-      residentialCost: scaleFinite(baseAxes.residentialCost, 1, tarmacBias * 0.7, 10),
+      residentialCost: scaleFinite(baseAxes.residentialCost, 1, tarmacBias * 0.75, 10),
       trafficClass2Penalty: scaleFinite(
         baseAxes.trafficClass2Penalty,
         kTraffic,
-        tPos > 0.45 ? (tPos - 0.45) * 0.45 : 0,
+        tPos > 0.45 ? (tPos - 0.45) * 0.5 : 0,
         10,
       ),
       trafficClass3Penalty: scaleFinite(
         baseAxes.trafficClass3Penalty,
         kTraffic,
-        tPos > 0.2 ? (tPos - 0.2) * 1.1 : 0,
+        tPos > 0.2 ? (tPos - 0.2) * 1.2 : 0,
         10,
       ),
       trafficClass4Penalty: scaleFinite(
         baseAxes.trafficClass4Penalty,
         kTraffic,
-        tPos > 0.15 ? (tPos - 0.15) * 2.2 : 0,
+        tPos > 0.15 ? (tPos - 0.15) * 2.4 : 0,
         10,
       ),
       trafficClass5Penalty: scaleFinite(
         baseAxes.trafficClass5Penalty,
         kTraffic,
-        tPos > 0.15 ? (tPos - 0.15) * 3.2 : 0,
+        tPos > 0.15 ? (tPos - 0.15) * 3.4 : 0,
         10,
       ),
       trafficClass6Penalty: scaleFinite(
         baseAxes.trafficClass6Penalty,
         kTraffic,
-        tPos > 0.15 ? (tPos - 0.15) * 4.2 : 0,
+        tPos > 0.15 ? (tPos - 0.15) * 4.4 : 0,
         10,
       ),
       trafficClass7Penalty: scaleFinite(
         baseAxes.trafficClass7Penalty,
         kTraffic,
-        tPos > 0.15 ? (tPos - 0.15) * 4.5 : 0,
+        tPos > 0.15 ? (tPos - 0.15) * 4.8 : 0,
         10,
       ),
 
       considerElevation: baseAxes.considerElevation || hillAdd > 0,
       uphillCost: clamp(Math.round(baseAxes.uphillCost * kHills + hillAdd), 0, 200),
-      uphillCutoff: Number(clamp(baseAxes.uphillCutoff * (1 - uHills * 0.38), 0.7, 3.8).toFixed(1)),
+      uphillCutoff: Number(clamp(baseAxes.uphillCutoff * (1 - u.hills * 0.4), 0.7, 3.8).toFixed(1)),
       downhillCost: clamp(Math.round(baseAxes.downhillCost * kHills), 0, 200),
 
       asphaltPenalty: scaleFinite(baseAxes.asphaltPenalty, 1, tarmacBias, 15),
       pavedPenalty: scaleFinite(baseAxes.pavedPenalty, 1, tarmacBias * 0.85, 15),
       concretePenalty: scaleFinite(baseAxes.concretePenalty, 1, tarmacBias * 0.85, 15),
-      untaggedRoadSurfacePenalty: scaleFinite(baseAxes.untaggedRoadSurfacePenalty, 1, tarmacBias * 0.85, 15),
+      untaggedRoadSurfacePenalty: scaleFinite(
+        baseAxes.untaggedRoadSurfacePenalty,
+        1,
+        tarmacBias * 0.85,
+        15,
+      ),
       compactedPenalty: scaleFinite(baseAxes.compactedPenalty, kSurface, roughAdd * 0.6, 15),
       fineGravelPenalty: scaleFinite(baseAxes.fineGravelPenalty, kSurface, roughAdd * 0.8, 15),
       gravelPenalty: scaleFinite(baseAxes.gravelPenalty, kSurface, roughAdd * 1.2, 15),
@@ -1013,7 +530,12 @@ function buildAxesProbes(
       pavingStonesPenalty: scaleFinite(baseAxes.pavingStonesPenalty, kSurface, 0, 15),
       settPenalty: scaleFinite(baseAxes.settPenalty, kSurface, 0, 15),
       cobblestonePenalty: scaleFinite(baseAxes.cobblestonePenalty, kSurface, 0, 15),
-      untaggedPathSurfacePenalty: scaleFinite(baseAxes.untaggedPathSurfacePenalty, kPathGate, roughAdd, 15),
+      untaggedPathSurfacePenalty: scaleFinite(
+        baseAxes.untaggedPathSurfacePenalty,
+        kPathGate,
+        roughAdd,
+        15,
+      ),
 
       trackGrade1Cost: scaleFinite(baseAxes.trackGrade1Cost, kSurface, 0, 20),
       trackGrade2Cost: scaleFinite(baseAxes.trackGrade2Cost, kSurface, 0, 20),
@@ -1027,12 +549,19 @@ function buildAxesProbes(
 
       turnCostGeneric: scaleIntFinite(baseAxes.turnCostGeneric, kTurns, 0, 300),
       turnCostCycleRoute:
-        cPos > 0.25 ? Math.min(baseTurnCycle, Math.round(baseAxes.turnCostCycleRoute / Math.sqrt(kCycle))) : baseTurnCycle,
+        cPos > 0.25
+          ? Math.min(baseTurnCycle, Math.round(baseAxes.turnCostCycleRoute / Math.sqrt(kCycle)))
+          : baseTurnCycle,
       trafficSignalCost: scaleIntFinite(baseAxes.trafficSignalCost, kTurns, 0, 300),
       stopGiveWayCost: scaleIntFinite(baseAxes.stopGiveWayCost, kTurns, 0, 300),
       roadTransitionCost: scaleIntFinite(baseAxes.roadTransitionCost, kTurns, 0, 300),
 
-      crossingClass3Cost: scaleIntFinite(baseAxes.crossingClass3Cost, kCross, tPos > 0.4 ? Math.round((tPos - 0.4) * 80) : 0, 500),
+      crossingClass3Cost: scaleIntFinite(
+        baseAxes.crossingClass3Cost,
+        kCross,
+        tPos > 0.4 ? Math.round((tPos - 0.4) * 80) : 0,
+        500,
+      ),
       crossingClass4Cost: scaleIntFinite(baseAxes.crossingClass4Cost, kCross, 0, 500),
       crossingClass5Cost: scaleIntFinite(baseAxes.crossingClass5Cost, kCross, 0, 500),
       turnAcrossTrafficClass3Cost: scaleIntFinite(baseAxes.turnAcrossTrafficClass3Cost, kCross, 0, 500),
@@ -1040,7 +569,7 @@ function buildAxesProbes(
       turnAcrossTrafficClass5Cost: scaleIntFinite(baseAxes.turnAcrossTrafficClass5Cost, kCross, 0, 500),
 
       nonCycleRouteRoadPenalty: clamp(
-        Number((baseAxes.nonCycleRouteRoadPenalty * kCycle + (cPos > 0.1 ? (cPos - 0.1) * 2.6 : 0)).toFixed(2)),
+        Number((baseAxes.nonCycleRouteRoadPenalty * kCycle + (cPos > 0.1 ? (cPos - 0.1) * 2.8 : 0)).toFixed(2)),
         0,
         5,
       ),
@@ -1063,63 +592,48 @@ function buildAxesProbes(
       noiseClass4Penalty: scaleFinite(
         baseAxes.noiseClass4Penalty,
         kNoise,
-        nPos > 0.15 ? (nPos - 0.15) * 1.9 : 0,
+        nPos > 0.15 ? (nPos - 0.15) * 2.0 : 0,
         10,
       ),
       noiseClass5Penalty: scaleFinite(
         baseAxes.noiseClass5Penalty,
         kNoise,
-        nPos > 0.15 ? (nPos - 0.15) * 3.0 : 0,
+        nPos > 0.15 ? (nPos - 0.15) * 3.2 : 0,
         10,
       ),
       noiseClass6Penalty: scaleFinite(
         baseAxes.noiseClass6Penalty,
         kNoise,
-        nPos > 0.15 ? (nPos - 0.15) * 4.2 : 0,
+        nPos > 0.15 ? (nPos - 0.15) * 4.4 : 0,
         10,
       ),
 
-      enableEnvironmentPenalties: baseAxes.enableEnvironmentPenalties || uEnv > 0.35 || tPos > 0.4,
+      enableEnvironmentPenalties: baseAxes.enableEnvironmentPenalties || u.lighting > 0.35 || tPos > 0.4,
       multiLanePenalty: scaleFinite(
         baseAxes.multiLanePenalty,
         kEnv,
-        uEnv > 0.45 ? 0.5 : tPos > 0.4 ? (tPos - 0.4) * 1.2 : 0,
+        u.lighting > 0.45 ? 0.5 : tPos > 0.4 ? (tPos - 0.4) * 1.2 : 0,
         10,
       ),
-      unlitPenalty: scaleFinite(baseAxes.unlitPenalty, kEnv, uEnv > 0.5 ? 0.5 : 0, 10),
+      unlitPenalty: scaleFinite(baseAxes.unlitPenalty, kEnv, u.lighting > 0.4 ? (u.lighting - 0.4) * 1.6 : 0, 10),
     };
 
-    const axisPulls: Array<{ dim: PerturbationDimension; mag: number; tag: string }> = [
-      { dim: 'Traffic', mag: Math.max(Math.abs(uTraffic), Math.abs(uCross)), tag: uTraffic >= 0 ? 'quieter traffic' : 'main roads' },
-      { dim: 'Hills', mag: Math.abs(uHills), tag: uHills >= 0 ? 'flatter' : 'climb-tolerant' },
-      { dim: 'Surface', mag: Math.abs(uSurface), tag: uSurface >= 0 ? 'smoother tarmac' : tarmacBias > 0 ? 'off-road trails' : 'gravel-tolerant' },
-      { dim: 'Directness', mag: Math.abs(uTurns), tag: uTurns >= 0 ? 'fewer turns' : 'agile turns' },
-      { dim: 'Cycleways', mag: Math.abs(uCycle), tag: uCycle >= 0 ? 'stronger bike-route adhesion' : 'less cycleway bias' },
-      {
-        dim: 'Scenery',
-        mag: Math.max(Math.abs(uNoise), Math.abs(uScenery), Math.abs(uEnv) * 0.7),
-        tag: Math.abs(uNoise) >= Math.abs(uScenery)
-          ? (uNoise >= 0 ? 'lower noise' : 'noise-tolerant')
-          : (uScenery >= 0 ? 'greener corridors' : 'urban-tolerant'),
-      },
-    ];
-    axisPulls.sort((a, b) => b.mag - a.mag);
-    const top1 = axisPulls[0];
-    const top2 = axisPulls[1];
-
-    const label = `Combined mix #${m}`;
-    const description = `Simultaneous multi-axis jitter led by ${top1.tag} and ${top2.tag}.`;
+    const dom = dominantAxisOf(u);
+    const label = `Sample #${m}`;
+    const description = `Perturbation led by ${dom.topTag.toLowerCase()} and ${dom.secondTag.toLowerCase()}.`;
     const fullDsl = generateBrfFromAxes(nextAxes, {
       name: `${profileLabel} (${label})`,
       summary: description,
     });
 
     probes.push({
-      id: `jitter-${m}`,
-      kind: 'jitter',
+      id: `sample-${m}`,
+      kind: 'sample',
       label,
-      dimension: top1.dim,
+      dimension: dom.dimension,
       description,
+      u,
+      norm,
       fullDsl,
       screeningDsl: injectScreeningPass2(fullDsl),
       axes: nextAxes,
@@ -1155,365 +669,27 @@ function buildDslProbes(baseDsl: string, scenarioCount: number): RobustnessProbe
   const safeAddWayCost = (expr: string) =>
     `assign costfactor = if greater costfactor 9998 then costfactor else max 1.0 ( add costfactor ( ${expr} ) )`;
 
-  const mildFlat = elevOverrides([
-    ['uphillcost', 75],
-    ['uphillcutoff', 1.2],
-    ['downhillcost', 45],
-  ]);
-  const strongFlat = elevOverrides([
-    ['uphillcost', 150],
-    ['uphillcutoff', 0.8],
-    ['downhillcost', 80],
-  ]);
-  const climbOk = elevOverrides([
-    ['uphillcost', 0],
-    ['uphillcutoff', 3.8],
-    ['downhillcost', 5],
-  ]);
-  const gentleDesc = elevOverrides([
-    ['downhillcost', 140],
-    ['downhillcutoff', 1.0],
-  ]);
+  const probes: RobustnessProbeSpec[] = [];
+  for (let m = 1; m <= scenarioCount; m++) {
+    const { u, norm } = samplePerturbationVector(m);
 
-  const directionalDefs: Array<{
-    id: string;
-    label: string;
-    dimension: PerturbationDimension;
-    description: string;
-    globalLines?: string[];
-    wayLines?: string[];
-    nodeLines?: string[];
-  }> = [
-    {
-      id: 'traffic-mild-quiet',
-      label: 'Mildly quieter roads',
-      dimension: 'Traffic',
-      description: 'Moderately higher penalties on main roads and busy traffic.',
-      wayLines: [
-        safeAddWayCost(
-          'add ( switch highway=primary|primary_link 0.6 switch highway=secondary|secondary_link 0.35 0 ) ( switch estimated_traffic_class=5|6|7 0.6 switch estimated_traffic_class=4 0.35 0 )',
-        ),
-      ],
-    },
-    {
-      id: 'traffic-strong-quiet',
-      label: 'Quiet backroads only',
-      dimension: 'Traffic',
-      description: 'Strong avoidance of main roads and heavy traffic.',
-      wayLines: [
-        safeAddWayCost(
-          'add ( switch highway=primary|primary_link 2.6 switch highway=secondary|secondary_link 1.6 switch highway=tertiary|tertiary_link 0.65 0 ) ( switch estimated_traffic_class=6|7 3.8 switch estimated_traffic_class=5 2.6 switch estimated_traffic_class=4 1.6 switch estimated_traffic_class=3 0.75 0 )',
-        ),
-      ],
-    },
-    {
-      id: 'traffic-noise-sanctuary',
-      label: 'Strict low traffic and noise',
-      dimension: 'Traffic',
-      description: 'Heavy avoidance of busy traffic classes and loud streets.',
-      wayLines: [
-        safeAddWayCost(
-          'add ( switch highway=primary|primary_link 4.0 switch highway=secondary|secondary_link 2.4 switch highway=tertiary|tertiary_link 1.0 0 ) ( add ( switch estimated_traffic_class=6|7 5.2 switch estimated_traffic_class=5 3.8 switch estimated_traffic_class=4 2.4 switch estimated_traffic_class=3 1.2 0 ) ( switch estimated_noise_class=6 4.0 switch estimated_noise_class=5 2.6 switch estimated_noise_class=4 1.5 switch estimated_noise_class=3 0.6 0 ) )',
-        ),
-      ],
-    },
-    {
-      id: 'traffic-relaxed',
-      label: 'Main-road tolerant',
-      dimension: 'Traffic',
-      description: 'Lowers penalties on primary, secondary, and tertiary roads.',
-      wayLines: [
-        safeAddWayCost(
-          'switch highway=primary|primary_link|secondary|secondary_link|tertiary|tertiary_link -0.45 0.1',
-        ),
-      ],
-    },
-    {
-      id: 'traffic-no-multilane',
-      label: 'Avoid multi-lane and tunnels',
-      dimension: 'Traffic',
-      description: 'Penalizes multi-lane roads and tunnels.',
-      wayLines: [
-        safeAddWayCost('add ( switch lanes=3|4|5|6|7|8 1.5 0 ) ( switch tunnel=yes 3.0 0 )'),
-      ],
-    },
-    {
-      id: 'junction-safe',
-      label: 'Strict junction safety',
-      dimension: 'Traffic',
-      description: 'Adds extra stop and signal crossing penalties.',
-      nodeLines: hasNodeInitialcost
-        ? ['assign initialcost = add initialcost switch highway=traffic_signals|crossing 120 switch highway=stop|give_way 90 0']
-        : ['assign initialcost = switch highway=traffic_signals|crossing 120 switch highway=stop|give_way 90 0'],
-    },
-    {
-      id: 'direct-high-flow',
-      label: 'Fast and direct',
-      dimension: 'Directness',
-      description: 'Fewer turns and stops, lower penalties on direct main roads.',
-      wayLines: [
-        safeAddWayCost(
-          'switch highway=primary|primary_link|secondary|secondary_link|tertiary|tertiary_link -0.35 0.15',
-        ),
-        ...(hasWayTurncost ? ['assign turncost = add turncost 110'] : []),
-      ],
-      nodeLines: hasNodeInitialcost
-        ? ['assign initialcost = add initialcost switch highway=traffic_signals|stop|give_way 100 0']
-        : ['assign initialcost = switch highway=traffic_signals|stop|give_way 100 0'],
-    },
-    {
-      id: 'direct-low-turn',
-      label: 'Minimal turns',
-      dimension: 'Directness',
-      description: 'High turn penalty while preserving road preferences.',
-      wayLines: hasWayTurncost ? ['assign turncost = add turncost 140'] : [safeAddWayCost('switch highway=residential|service 0.25 0')],
-    },
-    {
-      id: 'direct-agile',
-      label: 'Agile backstreets',
-      dimension: 'Directness',
-      description: 'Reduces turn penalties so backstreet shortcuts open up.',
-      wayLines: hasWayTurncost
-        ? ['assign turncost = multiply turncost 0.25']
-        : [safeAddWayCost('switch highway=residential|living_street -0.2 0')],
-    },
-    {
-      id: 'direct-pure-shortest',
-      label: 'Shortest legal distance',
-      dimension: 'Directness',
-      description: 'Minimizes distance by stripping soft climb, turn, and comfort biases.',
-      globalLines: climbOk.globalLines,
-      wayLines: [
-        ...climbOk.wayLines,
-        safeAddWayCost('switch highway=primary|secondary|tertiary|unclassified|residential -0.35 0'),
-        ...(hasWayTurncost ? ['assign turncost = min turncost 15'] : []),
-      ],
-    },
-    {
-      id: 'hills-mild-flat',
-      label: 'Mildly flatter',
-      dimension: 'Hills',
-      description: 'Moderately higher climb avoidance.',
-      globalLines: mildFlat.globalLines,
-      wayLines: mildFlat.wayLines,
-    },
-    {
-      id: 'hills-strong-flat',
-      label: 'Flattest route',
-      dimension: 'Hills',
-      description: 'Strong climb avoidance and low slope threshold.',
-      globalLines: strongFlat.globalLines,
-      wayLines: strongFlat.wayLines,
-    },
-    {
-      id: 'hills-climb-ok',
-      label: 'Climb-tolerant',
-      dimension: 'Hills',
-      description: 'Accepts steeper climbs when they shorten the route.',
-      globalLines: climbOk.globalLines,
-      wayLines: climbOk.wayLines,
-    },
-    {
-      id: 'hills-gentle-descents',
-      label: 'Cautious descents',
-      dimension: 'Hills',
-      description: 'Avoids steep descents.',
-      globalLines: gentleDesc.globalLines,
-      wayLines: gentleDesc.wayLines,
-    },
-    {
-      id: 'surface-strict-asphalt',
-      label: 'Strict smooth asphalt',
-      dimension: 'Surface',
-      description: 'Avoids gravel, cobbles, unpaved tracks, and rough paths.',
-      wayLines: [
-        safeAddWayCost(
-          'switch surface=gravel|unpaved|dirt|ground|earth|mud|sand|cobblestone 6.0 switch surface=compacted|fine_gravel|sett|paving_stones 2.8 switch highway=track|bridleway|path 2.2 0',
-        ),
-      ],
-    },
-    {
-      id: 'surface-light-gravel',
-      label: 'Towpaths and compacted',
-      dimension: 'Surface',
-      description: 'Lowers penalties on compacted gravel, towpaths, park gates, and smooth tracks.',
-      wayLines: [
-        safeAddWayCost(
-          'switch surface=compacted|fine_gravel -0.65 switch highway=cycleway|bridleway|pedestrian -0.35 0.1',
-        ),
-      ],
-    },
-    {
-      id: 'surface-adventure-gravel',
-      label: 'Gravel and bridleways',
-      dimension: 'Surface',
-      description: 'Welcomes gravel tracks, bridleways, commons, and unpaved trails.',
-      wayLines: [
-        safeAddWayCost(
-          'switch surface=gravel|compacted|fine_gravel|unpaved|ground|dirt|earth -1.5 switch highway=track|bridleway|path|pedestrian -1.0 0.25',
-        ),
-      ],
-    },
-    {
-      id: 'surface-offroad-trails',
-      label: 'Off-road gravel and commons',
-      dimension: 'Surface',
-      description: 'Actively prefers gravel, commons, and bridleways over tarmac streets.',
-      wayLines: [
-        safeAddWayCost(
-          'add ( switch surface=gravel|compacted|fine_gravel|unpaved|ground|dirt|earth|grass -2.2 switch highway=track|bridleway|path -1.6 0 ) ( switch highway=primary|secondary|tertiary|unclassified|residential 1.1 switch surface=asphalt|paved|concrete 0.7 0 )',
-        ),
-      ],
-    },
-    {
-      id: 'cycle-strict-network',
-      label: 'Quiet cycle networks',
-      dimension: 'Cycleways',
-      description: 'Strong pull toward signed cycle routes and cycleways.',
-      wayLines: [
-        safeAddWayCost(
-          'switch or route_bicycle_icn=yes or route_bicycle_ncn=yes or route_bicycle_rcn=yes or route_bicycle_lcn=yes highway=cycleway -0.45 1.8',
-        ),
-      ],
-    },
-    {
-      id: 'cycle-max-adhesion',
-      label: 'Strict bike-route adhesion',
-      dimension: 'Cycleways',
-      description: 'Very strong pull to stay on signed LCN, RCN, NCN, and dedicated cycleways.',
-      wayLines: [
-        safeAddWayCost(
-          'switch or route_bicycle_icn=yes or route_bicycle_ncn=yes or route_bicycle_rcn=yes or route_bicycle_lcn=yes highway=cycleway -0.6 3.4',
-        ),
-      ],
-    },
-    {
-      id: 'cycle-quiet-network-noise',
-      label: 'Quiet signed bike routes',
-      dimension: 'Cycleways',
-      description: 'Combines high bike-route adhesion with strong traffic and noise avoidance.',
-      wayLines: [
-        safeAddWayCost(
-          'add ( switch or route_bicycle_icn=yes or route_bicycle_ncn=yes or route_bicycle_rcn=yes or route_bicycle_lcn=yes highway=cycleway -0.5 2.4 ) ( add ( switch estimated_traffic_class=5|6|7 2.4 switch estimated_traffic_class=4 1.3 0 ) ( switch estimated_noise_class=5|6 2.0 switch estimated_noise_class=4 1.0 0 ) )',
-        ),
-      ],
-    },
-    {
-      id: 'cycle-arterial-lanes',
-      label: 'Arterial cycle superhighways',
-      dimension: 'Cycleways',
-      description: 'Follows direct signed cycle superhighways, urban trunks, and bus lanes.',
-      wayLines: [
-        safeAddWayCost(
-          'switch and ( or highway=trunk|primary|secondary highway=cycleway ) ( or route_bicycle_rcn=yes or route_bicycle_ncn=yes or route_bicycle_lcn=yes or cycleway=lane|track|share_busway busway=lane ) -1.4 1.2',
-        ),
-      ],
-    },
-    {
-      id: 'cycle-shared-paths',
-      label: 'Shared paths and plazas',
-      dimension: 'Cycleways',
-      description: 'Welcomes shared-use cycleways, pedestrian plazas, and signed park connectors.',
-      wayLines: [
-        safeAddWayCost(
-          'switch and highway=cycleway|pedestrian|footway|path ( or bicycle=yes|designated route_bicycle_lcn=yes ) -1.2 0.15',
-        ),
-      ],
-    },
-    {
-      id: 'cycle-unbiased',
-      label: 'Unbiased road choice',
-      dimension: 'Cycleways',
-      description: 'Reduces cycle-network bonus in favor of direct quiet streets.',
-      wayLines: [
-        safeAddWayCost(
-          'switch or route_bicycle_icn=yes or route_bicycle_ncn=yes or route_bicycle_rcn=yes route_bicycle_lcn=yes 0.35 -0.1',
-        ),
-      ],
-    },
-    {
-      id: 'scenery-low-noise',
-      label: 'Lowest noise streets',
-      dimension: 'Scenery',
-      description: 'Strong avoidance of moderate-to-extreme traffic noise independent of parks.',
-      wayLines: [
-        safeAddWayCost(
-          'switch estimated_noise_class=6 4.2 switch estimated_noise_class=5 2.8 switch estimated_noise_class=4 1.6 switch estimated_noise_class=3 0.7 0',
-        ),
-      ],
-    },
-    {
-      id: 'scenery-green-quiet',
-      label: 'Green streets and low noise',
-      dimension: 'Scenery',
-      description: 'Prefers green corridors, tree-lined streets, and low traffic noise.',
-      wayLines: [
-        safeAddWayCost(
-          'add ( switch estimated_forest_class=3|4|5|6 -0.25 0.6 ) ( switch estimated_noise_class=6 2.8 switch estimated_noise_class=5 1.8 switch estimated_noise_class=4 1.0 switch estimated_noise_class=3 0.35 0 )',
-        ),
-      ],
-    },
-    {
-      id: 'scenery-parks-commons',
-      label: 'Parks, commons, and greenways',
-      dimension: 'Scenery',
-      description: 'Seeks parks, commons, heaths, and wooded trails even on unpaved park paths.',
-      wayLines: [
-        safeAddWayCost(
-          'add ( switch estimated_forest_class=3|4|5|6 -0.6 switch estimated_forest_class=1|2 0.1 1.1 ) ( add ( switch surface=compacted|fine_gravel|gravel|unpaved|ground|dirt -1.4 0 ) ( switch highway=bridleway|track|cycleway|pedestrian -0.8 0 ) )',
-        ),
-      ],
-    },
-    {
-      id: 'scenery-well-lit',
-      label: 'Well-lit streets',
-      dimension: 'Scenery',
-      description: 'Avoids unlit paths and dark lanes.',
-      wayLines: [safeAddWayCost('switch lit=no 1.6 switch lit=yes -0.15 0.35')],
-    },
-  ];
-
-  const probes: RobustnessProbeSpec[] = selectDirectionalDefs(directionalDefs, scenarioCount).map(
-    (s) => {
-      const fullDsl = injectDslOverrides(baseDsl, {
-        globalLines: s.globalLines,
-        wayLines: s.wayLines,
-        nodeLines: s.nodeLines,
-      });
-      return {
-        id: s.id,
-        kind: 'directional',
-        label: s.label,
-        dimension: s.dimension,
-        description: s.description,
-        fullDsl,
-        screeningDsl: injectScreeningPass2(fullDsl),
-      };
-    });
-
-  const jitterCount = Math.max(0, scenarioCount - probes.length);
-  for (let m = 1; m <= jitterCount; m++) {
-    const uTraffic = halton(m, HALTON_PRIMES[0]) * 2 - 1;
-    const uHills = halton(m, HALTON_PRIMES[1]) * 2 - 1;
-    const uSurface = halton(m, HALTON_PRIMES[2]) * 2 - 1;
-    const uTurns = halton(m, HALTON_PRIMES[3]) * 2 - 1;
-    const uCycle = halton(m, HALTON_PRIMES[5]) * 2 - 1;
-    const uScenery = halton(m, HALTON_PRIMES[6]) * 2 - 1;
-    const uNoise = halton(m, HALTON_PRIMES[7]) * 2 - 1;
-
-    const dTraffic = Number((uTraffic >= 0 ? uTraffic * 2.8 : uTraffic * 0.9).toFixed(2));
-    const dTrafficMed = Number((uTraffic >= 0.2 ? (uTraffic - 0.2) * 1.4 : 0).toFixed(2));
-    const dSurface = Number((uSurface * 1.9).toFixed(2));
-    const dTarmac = uSurface < -0.35 ? Number(((-uSurface - 0.35) * 0.9).toFixed(2)) : 0;
-    const dCycleOff = Number((uCycle >= 0 ? uCycle * 2.8 : 0).toFixed(2));
-    const dCycleOn = Number((uCycle >= 0 ? -Math.min(0.5, uCycle * 0.45) : -uCycle * 0.4).toFixed(2));
-    const dNoiseHi = Number((uNoise >= 0 ? uNoise * 3.0 : uNoise * 0.5).toFixed(2));
-    const dNoiseMed = Number((uNoise >= 0.2 ? (uNoise - 0.2) * 1.4 : 0).toFixed(2));
-    const dForest = uScenery > 0.25 ? Number(((uScenery - 0.25) * 0.9).toFixed(2)) : 0;
-    const upCost = Math.round(clamp(55 + uHills * 75, 0, 175));
-    const upCut = Number(clamp(1.6 - uHills * 0.75, 0.8, 3.4).toFixed(1));
-    const downCost = Math.round(clamp(35 + uHills * 40, 0, 110));
-    const turnMul = Number(clamp(Math.exp(uTurns * 0.75), 0.3, 2.3).toFixed(2));
+    const dTraffic = Number((u.traffic >= 0 ? u.traffic * 3.0 : u.traffic * 0.95).toFixed(2));
+    const dTrafficMed = Number((u.traffic >= 0.2 ? (u.traffic - 0.2) * 1.5 : 0).toFixed(2));
+    const dSurface = Number((u.surface * 2.0).toFixed(2));
+    const dTarmac = u.surface < -0.3 ? Number(((-u.surface - 0.3) * 0.95).toFixed(2)) : 0;
+    const dCycleOff = Number((u.cycleways >= 0 ? u.cycleways * 2.9 : 0).toFixed(2));
+    const dCycleOn = Number(
+      (u.cycleways >= 0 ? -Math.min(0.55, u.cycleways * 0.45) : -u.cycleways * 0.4).toFixed(2),
+    );
+    const dNoiseHi = Number((u.noise >= 0 ? u.noise * 3.2 : u.noise * 0.5).toFixed(2));
+    const dNoiseMed = Number((u.noise >= 0.2 ? (u.noise - 0.2) * 1.5 : 0).toFixed(2));
+    const dForest = u.greenery > 0.2 ? Number(((u.greenery - 0.2) * 1.0).toFixed(2)) : 0;
+    const dUnlit = u.lighting > 0.35 ? Number(((u.lighting - 0.35) * 1.6).toFixed(2)) : 0;
+    const upCost = Math.round(clamp(55 + u.hills * 80, 0, 180));
+    const upCut = Number(clamp(1.6 - u.hills * 0.8, 0.8, 3.5).toFixed(1));
+    const downCost = Math.round(clamp(35 + u.hills * 40, 0, 110));
+    const turnMul = Number(clamp(Math.exp(u.turns * 0.8), 0.3, 2.4).toFixed(2));
+    const crossAdd = u.crossings > 0.2 ? Math.round((u.crossings - 0.2) * 140) : 0;
 
     const elev = elevOverrides([
       ['uphillcost', upCost],
@@ -1524,42 +700,39 @@ function buildDslProbes(baseDsl: string, scenarioCount: number): RobustnessProbe
     const wayLines: string[] = [
       ...elev.wayLines,
       safeAddWayCost(
-        `add ( switch highway=primary|primary_link|secondary|secondary_link ${dTraffic} 0 ) ( add ( switch estimated_traffic_class=5|6|7 ${dTraffic} switch estimated_traffic_class=3|4 ${dTrafficMed} 0 ) ( add ( switch surface=compacted|fine_gravel|gravel|unpaved|ground|dirt|earth ${dSurface} switch highway=residential|tertiary ${dTarmac} 0 ) ( add ( switch or route_bicycle_ncn=yes or route_bicycle_rcn=yes or route_bicycle_lcn=yes highway=cycleway ${dCycleOn} ${dCycleOff} ) ( add ( switch estimated_noise_class=5|6 ${dNoiseHi} switch estimated_noise_class=3|4 ${dNoiseMed} 0 ) ( switch estimated_forest_class=3|4|5|6 0 ${dForest} ) ) ) ) )`,
+        `add ( switch highway=primary|primary_link|secondary|secondary_link ${dTraffic} 0 ) ( add ( switch estimated_traffic_class=5|6|7 ${dTraffic} switch estimated_traffic_class=3|4 ${dTrafficMed} 0 ) ( add ( switch surface=compacted|fine_gravel|gravel|unpaved|ground|dirt|earth ${dSurface} switch highway=residential|tertiary ${dTarmac} 0 ) ( add ( switch or route_bicycle_ncn=yes or route_bicycle_rcn=yes or route_bicycle_lcn=yes highway=cycleway ${dCycleOn} ${dCycleOff} ) ( add ( switch estimated_noise_class=5|6 ${dNoiseHi} switch estimated_noise_class=3|4 ${dNoiseMed} 0 ) ( add ( switch estimated_forest_class=3|4|5|6 0 ${dForest} ) ( switch lit=no ${dUnlit} 0 ) ) ) ) ) )`,
       ),
     ];
     if (hasWayTurncost) {
       wayLines.push(`assign turncost = multiply turncost ${turnMul}`);
     }
 
-    const pulls: Array<{ dim: PerturbationDimension; mag: number; tag: string }> = [
-      { dim: 'Traffic', mag: Math.abs(uTraffic), tag: uTraffic >= 0 ? 'quieter traffic' : 'main roads' },
-      { dim: 'Hills', mag: Math.abs(uHills), tag: uHills >= 0 ? 'flatter' : 'climb-tolerant' },
-      { dim: 'Surface', mag: Math.abs(uSurface), tag: uSurface >= 0 ? 'smoother tarmac' : dTarmac > 0 ? 'off-road trails' : 'gravel-tolerant' },
-      { dim: 'Directness', mag: Math.abs(uTurns), tag: uTurns >= 0 ? 'fewer turns' : 'agile turns' },
-      { dim: 'Cycleways', mag: Math.abs(uCycle), tag: uCycle >= 0 ? 'stronger bike-route adhesion' : 'less cycleway bias' },
-      {
-        dim: 'Scenery',
-        mag: Math.max(Math.abs(uNoise), Math.abs(uScenery)),
-        tag: Math.abs(uNoise) >= Math.abs(uScenery)
-          ? (uNoise >= 0 ? 'lower noise' : 'noise-tolerant')
-          : (uScenery >= 0 ? 'greener corridors' : 'urban-tolerant'),
-      },
-    ];
-    pulls.sort((a, b) => b.mag - a.mag);
+    const nodeLines =
+      crossAdd > 0
+        ? [
+            hasNodeInitialcost
+              ? `assign initialcost = add initialcost switch highway=traffic_signals|crossing|stop|give_way ${crossAdd} 0`
+              : `assign initialcost = switch highway=traffic_signals|crossing|stop|give_way ${crossAdd} 0`,
+          ]
+        : undefined;
 
-    const label = `Combined mix #${m}`;
-    const description = `Simultaneous multi-axis jitter led by ${pulls[0].tag} and ${pulls[1].tag}.`;
+    const dom = dominantAxisOf(u);
+    const label = `Sample #${m}`;
+    const description = `Perturbation led by ${dom.topTag.toLowerCase()} and ${dom.secondTag.toLowerCase()}.`;
     const fullDsl = injectDslOverrides(baseDsl, {
       globalLines: elev.globalLines,
       wayLines,
+      nodeLines,
     });
 
     probes.push({
-      id: `jitter-${m}`,
-      kind: 'jitter',
+      id: `sample-${m}`,
+      kind: 'sample',
       label,
-      dimension: pulls[0].dim,
+      dimension: dom.dimension,
       description,
+      u,
+      norm,
       fullDsl,
       screeningDsl: injectScreeningPass2(fullDsl),
     });
@@ -1897,14 +1070,21 @@ interface ExtractedBranch extends PreparedGeometry {
   probeToM: number;
 }
 
+const LOOP_SNAP_THRESHOLD_SQ = 0.001 * 0.001; // ~110 m in degrees
+
 function nearestCoordIndex(
   coords: [number, number][],
+  cumDistM: Float64Array,
   target: [number, number],
+  expectedM: number,
   startIdx = 0,
 ): { idx: number; distSq: number } {
   const cosLat = Math.cos((target[1] * Math.PI) / 180);
   let bestIdx = startIdx;
   let bestDistSq = Number.POSITIVE_INFINITY;
+  let bestNearIdx = -1;
+  let bestNearScore = Number.POSITIVE_INFINITY;
+
   for (let i = startIdx; i < coords.length; i++) {
     const dx = (coords[i][0] - target[0]) * cosLat;
     const dy = coords[i][1] - target[1];
@@ -1913,22 +1093,106 @@ function nearestCoordIndex(
       bestDistSq = d2;
       bestIdx = i;
     }
+    if (d2 <= LOOP_SNAP_THRESHOLD_SQ) {
+      // Among points within ~110 m of the split/rejoin, prefer the leg closest to probe progress.
+      const progressPenalty = Math.abs(cumDistM[i] - expectedM);
+      if (progressPenalty < bestNearScore) {
+        bestNearScore = progressPenalty;
+        bestNearIdx = i;
+      }
+    }
+  }
+  if (bestNearIdx >= 0) {
+    const dx = (coords[bestNearIdx][0] - target[0]) * cosLat;
+    const dy = coords[bestNearIdx][1] - target[1];
+    return { idx: bestNearIdx, distSq: dx * dx + dy * dy };
   }
   return { idx: bestIdx, distSq: bestDistSq };
+}
+
+function buildBaseCellDists(base: PreparedRouteCacheEntry): Map<number, number[]> {
+  const cellDists = new Map<number, number[]>();
+  const addKeyDist = (key: number, distM: number) => {
+    const arr = cellDists.get(key);
+    if (!arr) {
+      cellDists.set(key, [distM]);
+      return;
+    }
+    if (Math.abs(distM - arr[arr.length - 1]) >= 500) {
+      arr.push(distM);
+    }
+  };
+  let prevGx = Number.NaN;
+  let prevGy = Number.NaN;
+  const markDist = (lon: number, lat: number, distM: number) => {
+    const gx = Math.round(lon * LON_GRID_SCALE);
+    const gy = Math.round(lat * LAT_GRID_SCALE);
+    if (gx === prevGx && gy === prevGy) return;
+    prevGx = gx;
+    prevGy = gy;
+    for (let dx = -1; dx <= 1; dx++) {
+      const rowBase = (gx + dx + GRID_OFFSET) * GRID_STRIDE + GRID_OFFSET;
+      addKeyDist(rowBase + (gy - 1), distM);
+      addKeyDist(rowBase + gy, distM);
+      addKeyDist(rowBase + (gy + 1), distM);
+    }
+  };
+
+  const coords = base.coords;
+  for (let i = 0; i < coords.length; i++) {
+    const [lon1, lat1] = coords[i];
+    const d1 = base.cumDistM[i];
+    markDist(lon1, lat1, d1);
+    if (i + 1 < coords.length) {
+      const [lon2, lat2] = coords[i + 1];
+      const segM = base.cumDistM[i + 1] - d1;
+      if (segM > 18) {
+        const steps = Math.min(200, Math.ceil(segM / 15));
+        for (let s = 1; s < steps; s++) {
+          const t = s / steps;
+          markDist(lon1 + (lon2 - lon1) * t, lat1 + (lat2 - lat1) * t, d1 + segM * t);
+        }
+      }
+    }
+  }
+  return cellDists;
 }
 
 function extractDetourBranches(
   base: PreparedRouteCacheEntry,
   probe: PreparedRouteCacheEntry,
+  baseCellDists: Map<number, number[]>,
 ): ExtractedBranch[] {
   const edgeCount = probe.edgeMidKeys.length;
   if (edgeCount === 0 || base.coords.length < 2) return [];
 
-  const baseGrid = base.dilatedGrid;
+  const baseTotalM =
+    base.cumDistM.length > 0 ? base.cumDistM[base.cumDistM.length - 1] : base.distanceM;
+  const probeTotalM =
+    probe.cumDistM.length > 0 ? probe.cumDistM[probe.cumDistM.length - 1] : probe.distanceM;
+  const progressTolM = Math.max(4000, Math.abs(probeTotalM - baseTotalM) + 0.25 * baseTotalM);
+
   const offBase = new Uint8Array(edgeCount);
   let anyOff = false;
   for (let i = 0; i < edgeCount; i++) {
-    if (!baseGrid.has(probe.edgeMidKeys[i])) {
+    const dists = baseCellDists.get(probe.edgeMidKeys[i]);
+    if (!dists) {
+      offBase[i] = 1;
+      anyOff = true;
+      continue;
+    }
+    const probeDist = probe.cumDistM[probe.edgeFromIdx[i]];
+    const probeRem = probeTotalM - probeDist;
+    let aligned = false;
+    for (let d = 0; d < dists.length; d++) {
+      const bd = dists[d];
+      const baseRem = baseTotalM - bd;
+      if (Math.min(Math.abs(bd - probeDist), Math.abs(baseRem - probeRem)) <= progressTolM) {
+        aligned = true;
+        break;
+      }
+    }
+    if (!aligned) {
       offBase[i] = 1;
       anyOff = true;
     }
@@ -1976,7 +1240,6 @@ function extractDetourBranches(
     const coords = probe.coords.slice(coordStart, coordEnd + 1);
     if (coords.length < 2) continue;
 
-    // Midpoint at 50% cumulative distance along this branch
     const probeFromM = probe.cumDistM[coordStart];
     const probeToM = probe.cumDistM[coordEnd];
     const halfTargetM = probeFromM + (probeToM - probeFromM) * 0.5;
@@ -1989,13 +1252,31 @@ function extractDetourBranches(
     }
     const midpoint = probe.coords[midIdx];
 
-    // Match branch endpoints back to the base route
-    const startMatch = nearestCoordIndex(base.coords, coords[0], 0);
+    const baseTotalM =
+      base.cumDistM.length > 0 ? base.cumDistM[base.cumDistM.length - 1] : base.distanceM;
+    const probeTotalM =
+      probe.cumDistM.length > 0 ? probe.cumDistM[probe.cumDistM.length - 1] : probe.distanceM;
+    const scale = probeTotalM > 0 ? baseTotalM / probeTotalM : 1;
+    const expectedStartM = probeFromM * scale;
+    const expectedEndM = probeToM * scale;
+
+    const startMatch = nearestCoordIndex(base.coords, base.cumDistM, coords[0], expectedStartM, 0);
     const baseStartIdx = startMatch.idx;
-    let endMatch = nearestCoordIndex(base.coords, coords[coords.length - 1], baseStartIdx);
-    // Allow fallback to full base scan only if forward search failed (> ~250 m away)
+    let endMatch = nearestCoordIndex(
+      base.coords,
+      base.cumDistM,
+      coords[coords.length - 1],
+      expectedEndM,
+      baseStartIdx,
+    );
     if (endMatch.distSq > 0.0025 * 0.0025) {
-      const fullEnd = nearestCoordIndex(base.coords, coords[coords.length - 1], 0);
+      const fullEnd = nearestCoordIndex(
+        base.coords,
+        base.cumDistM,
+        coords[coords.length - 1],
+        expectedEndM,
+        0,
+      );
       if (fullEnd.distSq < endMatch.distSq * 0.25) {
         endMatch = fullEnd;
       }
@@ -2010,7 +1291,6 @@ function extractDetourBranches(
       base.cumAscentM[baseEndIdx] - base.cumAscentM[baseStartIdx],
     );
 
-    // Build branch-local dilated grid for fast branch-to-branch clustering
     const dilatedGrid = new Set<number>();
     let prevGx = Number.NaN;
     let prevGy = Number.NaN;
@@ -2070,32 +1350,86 @@ export function classifyStabilityBand(stability: number): StabilityBand {
   return 'low';
 }
 
-function fallbackJitterLabel(
-  deltaDistanceM: number,
-  deltaAscentM: number,
-  deltaTimeS: number,
-  dimension: PerturbationDimension,
-): string {
-  if (deltaAscentM <= -15) return 'Lower-climb variant';
-  if (deltaTimeS <= -60) return 'Faster variant';
-  if (deltaDistanceM <= -250) return 'Shorter variant';
-  return `${dimension} mix variant`;
+interface StatisticalDrivers {
+  chips: string[];
+  topDimension: PerturbationDimension;
+  topTag: string | null;
+  secondTag: string | null;
+  isNearTie: boolean;
 }
 
-function fallbackBranchLabel(
-  deltaDistanceM: number,
-  deltaAscentM: number,
-  branchMix: SpanProfileMix,
-  dimension: PerturbationDimension,
-): string {
-  if (branchMix.hasData) {
-    if (branchMix.unpavedPct >= 40) return 'Unpaved trail branch';
-    if (branchMix.pathTrackPct >= 55) return 'Cycleway and path branch';
-    if (branchMix.mainRoadPct >= 55 && deltaDistanceM <= -100) return 'Direct main-road branch';
+/**
+ * Infers which parameter shifts statistically drove a cluster of Monte Carlo scenarios
+ * using empirical-Bayes shrinkage: sumU[axis] / (count + 2).
+ */
+function inferStatisticalDrivers(
+  sumU: Float64Array,
+  count: number,
+  fallbackDim: PerturbationDimension,
+): StatisticalDrivers {
+  if (count <= 0) {
+    return {
+      chips: ['Near-tie with base'],
+      topDimension: fallbackDim,
+      topTag: null,
+      secondTag: null,
+      isNearTie: true,
+    };
   }
-  if (deltaAscentM <= -12) return 'Flatter detour';
-  if (deltaDistanceM <= -150) return 'Shorter detour';
-  return `${dimension} detour`;
+
+  const denom = count + 2;
+  const ranked: Array<{
+    key: PerturbationAxisKey;
+    shrunk: number;
+    mag: number;
+    tag: string;
+    dimension: PerturbationDimension;
+  }> = [];
+
+  for (let i = 0; i < AXIS_KEYS.length; i++) {
+    const key = AXIS_KEYS[i];
+    const shrunk = sumU[i] / denom;
+    const mag = Math.abs(shrunk);
+    const meta = AXIS_META[key];
+    ranked.push({
+      key,
+      shrunk,
+      mag,
+      tag: shrunk >= 0 ? meta.posTag : meta.negTag,
+      dimension: meta.dimension,
+    });
+  }
+  ranked.sort((a, b) => b.mag - a.mag);
+
+  const significant = ranked.filter((r) => r.mag >= 0.12).slice(0, 3);
+  if (significant.length === 0) {
+    return {
+      chips: ['Near-tie with base'],
+      topDimension: ranked[0]?.dimension ?? fallbackDim,
+      topTag: null,
+      secondTag: null,
+      isNearTie: true,
+    };
+  }
+
+  return {
+    chips: significant.map((s) => s.tag),
+    topDimension: significant[0].dimension,
+    topTag: significant[0].tag,
+    secondTag: significant[1]?.tag ?? null,
+    isNearTie: false,
+  };
+}
+
+function formatKmSpanLabel(startM: number, endM: number): string {
+  return `km ${(startM / 1000).toFixed(1)}-${(endM / 1000).toFixed(1)}`;
+}
+
+function addVectorToSum(sumU: Float64Array, u: PerturbationVector | undefined): void {
+  if (!u) return;
+  for (let i = 0; i < AXIS_KEYS.length; i++) {
+    sumU[i] += u[AXIS_KEYS[i]];
+  }
 }
 
 export interface RobustnessSession {
@@ -2104,14 +1438,16 @@ export interface RobustnessSession {
 }
 
 /**
- * Incremental robustness accumulator. Each arriving probe updates edge support counts,
- * whole-route clusters, and local detour branches in O(edges + clusters) time.
+ * Incremental pure quasi-Monte-Carlo robustness accumulator. Each arriving sample updates
+ * edge stability, whole-route clusters, local detour branches, per-axis sums, and
+ * minimum-perturbation cluster representatives in O(edges + clusters) time.
  */
 export function createRobustnessSession(
   baseRoute: RouteResponse,
   totalCount: number,
 ): RobustnessSession {
   const base = prepareRoute(baseRoute);
+  const baseCellDists = buildBaseCellDists(base);
   const baseKeys = base.edgeMidKeys;
   const baseDists = base.edgeDists;
   const baseFromIdx = base.edgeFromIdx;
@@ -2119,22 +1455,27 @@ export function createRobustnessSession(
 
   let completedCount = 0;
   let baseMatchingProbes = 0;
-  let hasDirectional = false;
+  let nextCorridorSeq = 1;
   let nextBranchSeq = 1;
 
-  const dirDimMap = new Map<PerturbationDimension, number>();
-  const allDimMap = new Map<PerturbationDimension, number>();
+  const divergedSumU = new Float64Array(AXIS_KEYS.length);
+  let divergedCount = 0;
+  const fallbackDimMaxDiv = new Map<PerturbationDimension, number>();
 
   interface PreparedProbeItem {
     probe: RobustnessProbeResult;
     prepared: PreparedRouteCacheEntry;
     overlapWithBase: number;
+    norm: number;
   }
 
   const clusters: Array<{
+    stableId: string;
+    color: { line: string; casing: string };
     primary: PreparedProbeItem;
-    directionalLabels: string[];
-    allLabels: string[];
+    minNorm: number;
+    sumU: Float64Array;
+    hasVectors: boolean;
     probeCount: number;
   }> = [];
 
@@ -2144,10 +1485,10 @@ export function createRobustnessSession(
     branch: ExtractedBranch;
     primaryProbe: RobustnessProbeResult;
     primarySegments: SegmentData[];
+    minNorm: number;
+    sumU: Float64Array;
+    hasVectors: boolean;
     probeIds: Set<string>;
-    directionalLabels: string[];
-    allLabels: string[];
-    dimCounts: Map<PerturbationDimension, number>;
   }> = [];
 
   return {
@@ -2155,6 +1496,7 @@ export function createRobustnessSession(
       completedCount++;
       const prepared = prepareRoute(probe.route);
       const probeGrid = prepared.dilatedGrid;
+      const probeNorm = probe.norm ?? Number.POSITIVE_INFINITY;
 
       for (let i = 0; i < baseKeys.length; i++) {
         if (probeGrid.has(baseKeys[i])) {
@@ -2164,20 +1506,13 @@ export function createRobustnessSession(
 
       const overlapWithBase = symmetricOverlap(base, prepared);
       const divPct = Math.round((1 - overlapWithBase) * 100);
-      const prevAll = allDimMap.get(probe.dimension) ?? 0;
-      if (divPct > prevAll) {
-        allDimMap.set(probe.dimension, divPct);
-      }
-      if (probe.kind === 'directional') {
-        hasDirectional = true;
-        const prevDir = dirDimMap.get(probe.dimension) ?? 0;
-        if (divPct > prevDir) {
-          dirDimMap.set(probe.dimension, divPct);
-        }
+      const prevFallback = fallbackDimMaxDiv.get(probe.dimension) ?? 0;
+      if (divPct > prevFallback) {
+        fallbackDimMaxDiv.set(probe.dimension, divPct);
       }
 
-      // Extract and cluster local off-base detour branches regardless of whole-route overlap
-      const extracted = extractDetourBranches(base, prepared);
+      // Extract and cluster local off-base detour branches independently
+      const extracted = extractDetourBranches(base, prepared, baseCellDists);
       for (const b of extracted) {
         let matched: (typeof branchClusters)[number] | undefined;
         let bestOverlap = 0;
@@ -2194,38 +1529,32 @@ export function createRobustnessSession(
         if (matched) {
           if (!matched.probeIds.has(probe.id)) {
             matched.probeIds.add(probe.id);
-            matched.dimCounts.set(
-              probe.dimension,
-              (matched.dimCounts.get(probe.dimension) ?? 0) + 1,
-            );
-          }
-          if (!matched.allLabels.includes(probe.label)) {
-            matched.allLabels.push(probe.label);
-          }
-          if (probe.kind === 'directional') {
-            if (!matched.directionalLabels.includes(probe.label)) {
-              matched.directionalLabels.push(probe.label);
+            if (probe.u) {
+              addVectorToSum(matched.sumU, probe.u);
+              matched.hasVectors = true;
             }
-            if (matched.primaryProbe.kind === 'jitter') {
-              matched.primaryProbe = probe;
-              matched.primarySegments = prepared.segments;
-              matched.branch = b;
-            }
+          }
+          // Keep the minimum-perturbation sample as the cluster's representative for + Compare
+          if (probeNorm < matched.minNorm) {
+            matched.minNorm = probeNorm;
+            matched.primaryProbe = probe;
+            matched.primarySegments = prepared.segments;
+            matched.branch = b;
           }
         } else {
           const seq = nextBranchSeq++;
-          const dimCounts = new Map<PerturbationDimension, number>();
-          dimCounts.set(probe.dimension, 1);
+          const sumU = new Float64Array(AXIS_KEYS.length);
+          if (probe.u) addVectorToSum(sumU, probe.u);
           branchClusters.push({
             stableId: `branch-${seq}`,
             color: ROBUSTNESS_CORRIDOR_COLORS[(seq - 1) % ROBUSTNESS_CORRIDOR_COLORS.length],
             branch: b,
             primaryProbe: probe,
             primarySegments: prepared.segments,
+            minNorm: probeNorm,
+            sumU,
+            hasVectors: Boolean(probe.u),
             probeIds: new Set([probe.id]),
-            directionalLabels: probe.kind === 'directional' ? [probe.label] : [],
-            allLabels: [probe.label],
-            dimCounts,
           });
         }
       }
@@ -2235,28 +1564,34 @@ export function createRobustnessSession(
         return;
       }
 
-      const item: PreparedProbeItem = { probe, prepared, overlapWithBase };
+      divergedCount++;
+      if (probe.u) addVectorToSum(divergedSumU, probe.u);
+
+      const item: PreparedProbeItem = { probe, prepared, overlapWithBase, norm: probeNorm };
       const existing = clusters.find(
         (c) => symmetricOverlap(c.primary.prepared, prepared) >= 0.78,
       );
       if (existing) {
         existing.probeCount++;
-        if (!existing.allLabels.includes(probe.label)) {
-          existing.allLabels.push(probe.label);
+        if (probe.u) {
+          addVectorToSum(existing.sumU, probe.u);
+          existing.hasVectors = true;
         }
-        if (probe.kind === 'directional') {
-          if (!existing.directionalLabels.includes(probe.label)) {
-            existing.directionalLabels.push(probe.label);
-          }
-          if (existing.primary.probe.kind === 'jitter') {
-            existing.primary = item;
-          }
+        if (probeNorm < existing.minNorm) {
+          existing.minNorm = probeNorm;
+          existing.primary = item;
         }
       } else {
+        const seq = nextCorridorSeq++;
+        const sumU = new Float64Array(AXIS_KEYS.length);
+        if (probe.u) addVectorToSum(sumU, probe.u);
         clusters.push({
+          stableId: `corridor-${seq}`,
+          color: ROBUSTNESS_CORRIDOR_COLORS[(seq - 1) % ROBUSTNESS_CORRIDOR_COLORS.length],
           primary: item,
-          directionalLabels: probe.kind === 'directional' ? [probe.label] : [],
-          allLabels: [probe.label],
+          minNorm: probeNorm,
+          sumU,
+          hasVectors: Boolean(probe.u),
           probeCount: 1,
         });
       }
@@ -2300,144 +1635,193 @@ export function createRobustnessSession(
         }
       }
 
+      const baseFullMix = summarizeSpanMix(
+        base.segments,
+        0,
+        base.cumDistM.length > 0 ? base.cumDistM[base.cumDistM.length - 1] : base.distanceM,
+      );
+
+      // Whole-route variants (keep all multi-hit variants + up to MAX_SINGLE_HIT_CORRIDORS)
       const sortedClusters = [...clusters].sort((a, b) => {
         if (b.probeCount !== a.probeCount) return b.probeCount - a.probeCount;
-        const aDir = a.directionalLabels.length > 0 ? 1 : 0;
-        const bDir = b.directionalLabels.length > 0 ? 1 : 0;
-        if (bDir !== aDir) return bDir - aDir;
+        if (a.minNorm !== b.minNorm) return a.minNorm - b.minNorm;
         return a.primary.overlapWithBase - b.primary.overlapWithBase;
       });
 
-      const corridors: AlternativeCorridor[] = sortedClusters
-        .slice(0, MAX_DISPLAY_CORRIDORS)
-        .map((c, idx) => {
-          const { probe, prepared, overlapWithBase } = c.primary;
-          const color = ROBUSTNESS_CORRIDOR_COLORS[idx % ROBUSTNESS_CORRIDOR_COLORS.length];
-          const deltaDistanceM = prepared.distanceM - base.distanceM;
-          const deltaTimeS = prepared.timeS - base.timeS;
-          const deltaAscentM = prepared.ascentM - base.ascentM;
+      const keptClusters: typeof sortedClusters = [];
+      let singleCorridors = 0;
+      for (const c of sortedClusters) {
+        if (keptClusters.length >= MAX_DISPLAY_CORRIDORS) break;
+        if (c.probeCount >= 2) {
+          keptClusters.push(c);
+        } else if (singleCorridors < MAX_SINGLE_HIT_CORRIDORS) {
+          singleCorridors++;
+          keptClusters.push(c);
+        }
+      }
 
-          const displayLabel =
-            c.directionalLabels.length > 0
-              ? c.directionalLabels[0]
-              : probe.kind === 'directional'
-                ? probe.label
-                : fallbackJitterLabel(deltaDistanceM, deltaAscentM, deltaTimeS, probe.dimension);
+      const corridors: AlternativeCorridor[] = keptClusters.map((c, idx) => {
+        const { probe, prepared, overlapWithBase } = c.primary;
+        const deltaDistanceM = prepared.distanceM - base.distanceM;
+        const deltaTimeS = prepared.timeS - base.timeS;
+        const deltaAscentM = prepared.ascentM - base.ascentM;
 
-          const probeLabels =
-            c.directionalLabels.length > 0 ? c.directionalLabels : c.allLabels.slice(0, 4);
+        const totalLenM =
+          prepared.cumDistM.length > 0
+            ? prepared.cumDistM[prepared.cumDistM.length - 1]
+            : prepared.distanceM;
+        const routeMix = summarizeSpanMix(prepared.segments, 0, totalLenM);
 
-          return {
-            id: probe.id,
-            label: displayLabel,
-            probeLabels,
-            description: probe.description,
-            dimension: probe.dimension,
-            probeCount: c.probeCount,
-            sharePct: completedCount > 0 ? Math.round((c.probeCount / completedCount) * 100) : 0,
-            route: probe.route,
-            coordinates: prepared.coords,
-            color,
-            distanceM: prepared.distanceM,
-            timeS: prepared.timeS,
-            ascentM: prepared.ascentM,
-            deltaDistanceM,
-            deltaTimeS,
-            deltaAscentM,
-            overlapWithBase,
-            fullDsl: probe.fullDsl,
-            axes: probe.axes,
-            baseTemplate: probe.baseTemplate,
-          };
-        });
+        const midTarget = totalLenM * 0.5;
+        let midIdx = Math.floor(prepared.coords.length / 2);
+        for (let i = 0; i < prepared.cumDistM.length; i++) {
+          if (prepared.cumDistM[i] >= midTarget) {
+            midIdx = i;
+            break;
+          }
+        }
+        const midpoint: [number, number] = prepared.coords[midIdx] ?? prepared.coords[0] ?? [0, 0];
 
+        const drivers = c.hasVectors
+          ? inferStatisticalDrivers(c.sumU, c.probeCount, probe.dimension)
+          : {
+              chips: [probe.label],
+              topDimension: probe.dimension,
+              topTag: null,
+              secondTag: null,
+              isNearTie: true,
+            };
+
+        const displayLabel = `Variant ${idx + 1}`;
+        const description = `Full route variant chosen by ${c.probeCount} of ${completedCount} runs.`;
+
+        return {
+          id: c.stableId,
+          label: displayLabel,
+          probeLabels: drivers.chips,
+          description,
+          dimension: drivers.topDimension,
+          probeCount: c.probeCount,
+          sharePct: completedCount > 0 ? Math.round((c.probeCount / completedCount) * 100) : 0,
+          route: probe.route,
+          coordinates: prepared.coords,
+          midpoint,
+          color: c.color,
+          distanceM: prepared.distanceM,
+          timeS: prepared.timeS,
+          ascentM: prepared.ascentM,
+          deltaDistanceM,
+          deltaTimeS,
+          deltaAscentM,
+          overlapWithBase,
+          routeMix,
+          baseMix: baseFullMix,
+          fullDsl: probe.fullDsl,
+          axes: probe.axes,
+          baseTemplate: probe.baseTemplate,
+        };
+      });
+
+      // Detour branches (keep all multi-hit branches + up to MAX_SINGLE_HIT_BRANCHES)
       const sortedBranches = [...branchClusters].sort((a, b) => {
         const countDiff = b.probeIds.size - a.probeIds.size;
         if (countDiff !== 0) return countDiff;
-        const aDir = a.directionalLabels.length > 0 ? 1 : 0;
-        const bDir = b.directionalLabels.length > 0 ? 1 : 0;
-        if (bDir !== aDir) return bDir - aDir;
+        if (a.minNorm !== b.minNorm) return a.minNorm - b.minNorm;
         return b.branch.distanceM - a.branch.distanceM;
       });
 
-      // Keep all directional branches and all multi-scenario branches so discovered routes never
-      // vanish mid-sweep; cap only single-hit jitter-only micro-detours.
       const keptBranches: typeof sortedBranches = [];
-      let singleJitterCount = 0;
+      let singleBranches = 0;
       for (const bc of sortedBranches) {
         if (keptBranches.length >= MAX_DISPLAY_BRANCHES) break;
-        const isPersistent = bc.directionalLabels.length > 0 || bc.probeIds.size >= 2;
-        if (isPersistent) {
+        if (bc.probeIds.size >= 2) {
           keptBranches.push(bc);
-        } else if (singleJitterCount < MAX_SINGLE_JITTER_BRANCHES) {
-          singleJitterCount++;
+        } else if (singleBranches < MAX_SINGLE_HIT_BRANCHES) {
+          singleBranches++;
           keptBranches.push(bc);
         }
       }
 
       const branches: AlternativeBranch[] = keptBranches.map((bc) => {
-          const b = bc.branch;
-          const probe = bc.primaryProbe;
-          const color = bc.color;
-          const probeCount = bc.probeIds.size;
-          const deltaDistanceM = b.distanceM - b.replacedBaseDistM;
-          const deltaAscentM = Math.round(b.ascentM - b.replacedBaseAscentM);
-          const branchMix = summarizeSpanMix(bc.primarySegments, b.probeFromM, b.probeToM);
-          const baseMix = summarizeSpanMix(base.segments, b.baseStartM, b.baseEndM);
+        const b = bc.branch;
+        const probe = bc.primaryProbe;
+        const probeCount = bc.probeIds.size;
+        const deltaDistanceM = b.distanceM - b.replacedBaseDistM;
+        const deltaAscentM = Math.round(b.ascentM - b.replacedBaseAscentM);
+        const branchMix = summarizeSpanMix(bc.primarySegments, b.probeFromM, b.probeToM);
+        const baseMix = summarizeSpanMix(base.segments, b.baseStartM, b.baseEndM);
 
-          let topDim: PerturbationDimension = probe.dimension;
-          let topDimCount = -1;
-          for (const [dim, count] of bc.dimCounts.entries()) {
-            if (count > topDimCount) {
-              topDimCount = count;
-              topDim = dim;
-            }
+        const drivers = bc.hasVectors
+          ? inferStatisticalDrivers(bc.sumU, probeCount, probe.dimension)
+          : {
+              chips: [probe.label],
+              topDimension: probe.dimension,
+              topTag: null,
+              secondTag: null,
+              isNearTie: true,
+            };
+
+        const displayLabel = formatKmSpanLabel(b.baseStartM, b.baseEndM);
+        const description = `Detour segment at ${displayLabel}, chosen by ${probeCount} of ${completedCount} runs.`;
+
+        const replacedBaseCoords =
+          b.baseEndIdx > b.baseStartIdx
+            ? base.coords.slice(b.baseStartIdx, b.baseEndIdx + 1)
+            : [];
+
+        return {
+          id: bc.stableId,
+          label: displayLabel,
+          probeLabels: drivers.chips,
+          description,
+          dimension: drivers.topDimension,
+          probeCount,
+          sharePct: completedCount > 0 ? Math.round((probeCount / completedCount) * 100) : 0,
+          coordinates: b.coords,
+          midpoint: b.midpoint,
+          replacedBaseCoords,
+          color: bc.color,
+          baseStartM: b.baseStartM,
+          baseEndM: b.baseEndM,
+          distanceM: b.distanceM,
+          replacedBaseDistM: b.replacedBaseDistM,
+          deltaDistanceM,
+          ascentM: Math.round(b.ascentM),
+          replacedBaseAscentM: Math.round(b.replacedBaseAscentM),
+          deltaAscentM,
+          branchMix,
+          baseMix,
+          fullDsl: probe.fullDsl,
+          axes: probe.axes,
+          baseTemplate: probe.baseTemplate,
+        };
+      });
+
+      // Statistical per-dimension sensitivity: max empirical-Bayes shrunk shift across discovered
+      // branches and diverging scenarios.
+      const dimSens = new Map<PerturbationDimension, number>();
+      let usedVectors = false;
+      const recordSumU = (sumU: Float64Array, count: number) => {
+        if (count < 2) return;
+        usedVectors = true;
+        const denom = count + 2;
+        for (let i = 0; i < AXIS_KEYS.length; i++) {
+          const pct = Math.min(100, Math.round((Math.abs(sumU[i]) / denom) * 100));
+          const dim = AXIS_META[AXIS_KEYS[i]].dimension;
+          if (pct > (dimSens.get(dim) ?? 0)) {
+            dimSens.set(dim, pct);
           }
+        }
+      };
 
-          const displayLabel =
-            bc.directionalLabels.length > 0
-              ? bc.directionalLabels[0]
-              : probe.kind === 'directional'
-                ? probe.label
-                : fallbackBranchLabel(deltaDistanceM, deltaAscentM, branchMix, topDim);
+      for (const bc of branchClusters) {
+        if (bc.hasVectors) recordSumU(bc.sumU, bc.probeIds.size);
+      }
+      if (divergedCount >= 2) {
+        recordSumU(divergedSumU, divergedCount);
+      }
 
-          const probeLabels =
-            bc.directionalLabels.length > 0 ? bc.directionalLabels : bc.allLabels.slice(0, 4);
-
-          const replacedBaseCoords =
-            b.baseEndIdx > b.baseStartIdx
-              ? base.coords.slice(b.baseStartIdx, b.baseEndIdx + 1)
-              : [];
-
-          return {
-            id: bc.stableId,
-            label: displayLabel,
-            probeLabels,
-            description: probe.description,
-            dimension: topDim,
-            probeCount,
-            sharePct: completedCount > 0 ? Math.round((probeCount / completedCount) * 100) : 0,
-            coordinates: b.coords,
-            midpoint: b.midpoint,
-            replacedBaseCoords,
-            color,
-            baseStartM: b.baseStartM,
-            baseEndM: b.baseEndM,
-            distanceM: b.distanceM,
-            replacedBaseDistM: b.replacedBaseDistM,
-            deltaDistanceM,
-            ascentM: Math.round(b.ascentM),
-            replacedBaseAscentM: Math.round(b.replacedBaseAscentM),
-            deltaAscentM,
-            branchMix,
-            baseMix,
-            fullDsl: probe.fullDsl,
-            axes: probe.axes,
-            baseTemplate: probe.baseTemplate,
-          };
-        });
-
-      const activeDimMap = hasDirectional ? dirDimMap : allDimMap;
+      const activeDimMap = usedVectors ? dimSens : fallbackDimMaxDiv;
       const dimensions: DimensionSensitivity[] = DIMENSION_ORDER.filter((d) => activeDimMap.has(d))
         .map((dimension) => ({
           dimension,
@@ -2471,4 +1855,320 @@ export function analyzeRobustness(
     session.addProbe(probe);
   }
   return session.snapshot();
+}
+
+const VARIANT_MASS_TARGET = 0.7;
+const VARIANT_MIN_RUN_SHARE = 0.05;
+const VARIANT_ALWAYS_KEEP_SHARE = 0.15;
+const BRANCH_PRIMARY_SHARE = 0.15;
+const BRANCH_FALLBACK_SHARE = 0.1;
+
+/**
+ * Keeps whole-route variants carrying the top 70% of diverging probability mass
+ * (filtering single-hit noise once multi-hit variants exist, and pruning <5% tail variants).
+ */
+export function filterFrequentCorridors(
+  corridors: AlternativeCorridor[],
+  completedCount: number,
+): AlternativeCorridor[] {
+  if (corridors.length <= 1 || completedCount <= 0) return corridors;
+
+  const sorted = [...corridors].sort((a, b) => b.probeCount - a.probeCount);
+  const totalAltRuns = sorted.reduce((acc, c) => acc + c.probeCount, 0);
+  if (totalAltRuns <= 0) return sorted;
+
+  const multiHit = sorted.filter((c) => c.probeCount >= 2);
+  const pool = multiHit.length > 0 ? multiHit : sorted.slice(0, 3);
+  const topCount = pool[0].probeCount;
+
+  const kept: AlternativeCorridor[] = [];
+  let cumRuns = 0;
+  for (let i = 0; i < pool.length; i++) {
+    const c = pool[i];
+    const runShare = c.probeCount / completedCount;
+    const isTopTie = i === 0 || c.probeCount === topCount;
+    const withinNucleus = cumRuns / totalAltRuns < VARIANT_MASS_TARGET && runShare >= VARIANT_MIN_RUN_SHARE;
+    if (isTopTie || runShare >= VARIANT_ALWAYS_KEEP_SHARE || withinNucleus) {
+      kept.push(c);
+      cumRuns += c.probeCount;
+    } else {
+      break;
+    }
+  }
+  return kept;
+}
+
+/**
+ * Keeps local detour branches with high marginal probability (>=15% of runs, relaxing to
+ * >=10% or top-half of max support when all branches are rare).
+ */
+export function filterFrequentBranches(
+  branches: AlternativeBranch[],
+  completedCount: number,
+): AlternativeBranch[] {
+  if (branches.length <= 1 || completedCount <= 0) return branches;
+
+  const sorted = [...branches].sort((a, b) => b.probeCount - a.probeCount);
+  const multiHit = sorted.filter((b) => b.probeCount >= 2);
+  const pool = multiHit.length > 0 ? multiHit : sorted.slice(0, 3);
+
+  const primary = pool.filter((b) => b.probeCount / completedCount >= BRANCH_PRIMARY_SHARE);
+  if (primary.length > 0) return primary;
+
+  const fallback = pool.filter((b) => b.probeCount / completedCount >= BRANCH_FALLBACK_SHARE);
+  if (fallback.length > 0) return fallback;
+
+  const minCount = Math.max(2, Math.ceil(pool[0].probeCount * 0.5));
+  return pool.filter((b) => b.probeCount >= minCount);
+}
+
+export function filterRobustnessAnalysis(
+  analysis: RobustnessAnalysis,
+  filterMode: RobustnessFilterMode,
+): RobustnessAnalysis {
+  if (filterMode === 'all') return analysis;
+  return {
+    ...analysis,
+    branches: filterFrequentBranches(analysis.branches, analysis.completedCount),
+    corridors: filterFrequentCorridors(analysis.corridors, analysis.completedCount),
+  };
+}
+
+export interface BranchLegSplice {
+  legIdx: number;
+  coords: [number, number][];
+}
+
+function projectWaypointsMonotonic(
+  coords: [number, number][],
+  waypoints: ReadonlyArray<{ lat: number; lon: number }>,
+): number[] {
+  const n = waypoints.length;
+  const result = new Array<number>(n);
+  if (n === 0 || coords.length === 0) return result;
+  result[0] = 0;
+  result[n - 1] = coords.length - 1;
+
+  for (let w = 1; w < n - 1; w++) {
+    const start = result[w - 1];
+    const target = waypoints[w];
+    const cosLat = Math.cos((target.lat * Math.PI) / 180);
+    let bestGlobalIdx = start;
+    let bestGlobalD2 = Number.POSITIVE_INFINITY;
+    let firstPassIdx = -1;
+    let firstPassD2 = Number.POSITIVE_INFINITY;
+    const passThresholdSq = 0.0006 * 0.0006; // ~65 m
+
+    for (let i = start; i < coords.length; i++) {
+      const dx = (coords[i][0] - target.lon) * cosLat;
+      const dy = coords[i][1] - target.lat;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestGlobalD2) {
+        bestGlobalD2 = d2;
+        bestGlobalIdx = i;
+      }
+      if (d2 <= passThresholdSq) {
+        if (d2 < firstPassD2) {
+          firstPassD2 = d2;
+          firstPassIdx = i;
+        }
+      } else if (firstPassIdx >= 0) {
+        // Exited the first close pass around this waypoint; do not jump to a later loop leg.
+        break;
+      }
+    }
+    result[w] = firstPassIdx >= 0 ? firstPassIdx : bestGlobalIdx;
+  }
+  return result;
+}
+
+function nearestIdxInRange(
+  coords: [number, number][],
+  target: [number, number],
+  startIdx: number,
+  endIdx: number,
+): number {
+  const cosLat = Math.cos((target[1] * Math.PI) / 180);
+  let best = startIdx;
+  let bestD2 = Number.POSITIVE_INFINITY;
+  const hi = Math.min(coords.length - 1, endIdx);
+  for (let i = Math.max(0, startIdx); i <= hi; i++) {
+    const dx = (coords[i][0] - target[0]) * cosLat;
+    const dy = coords[i][1] - target[1];
+    const d2 = dx * dx + dy * dy;
+    if (d2 < bestD2) {
+      bestD2 = d2;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function coordsDivergeFromBaseLeg(
+  legTarget: [number, number][],
+  baseLeg: [number, number][],
+): boolean {
+  if (legTarget.length < 2 || baseLeg.length < 2) return false;
+  const grid = new Set<number>();
+  for (let i = 0; i < baseLeg.length; i++) {
+    const [lon1, lat1] = baseLeg[i];
+    const gx = Math.round(lon1 * LON_GRID_SCALE);
+    const gy = Math.round(lat1 * LAT_GRID_SCALE);
+    addDilatedCell(grid, gx, gy);
+    if (i + 1 < baseLeg.length) {
+      const [lon2, lat2] = baseLeg[i + 1];
+      const segM = distanceMeters({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 });
+      if (segM > 18) {
+        const steps = Math.min(120, Math.ceil(segM / 15));
+        for (let s = 1; s < steps; s++) {
+          const t = s / steps;
+          addDilatedCell(
+            grid,
+            Math.round((lon1 + (lon2 - lon1) * t) * LON_GRID_SCALE),
+            Math.round((lat1 + (lat2 - lat1) * t) * LAT_GRID_SCALE),
+          );
+        }
+      }
+    }
+  }
+  let offDistM = 0;
+  for (let i = 0; i + 1 < legTarget.length; i++) {
+    const [lon1, lat1] = legTarget[i];
+    const [lon2, lat2] = legTarget[i + 1];
+    const midKey = cellKey(
+      Math.round((lon1 + lon2) * 0.5 * LON_GRID_SCALE),
+      Math.round((lat1 + lat2) * 0.5 * LAT_GRID_SCALE),
+    );
+    if (!grid.has(midKey)) {
+      offDistM += distanceMeters({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 });
+      if (offDistM >= 80) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Plans per-leg spliced coordinates for applying a detour segment or full-route variant
+ * while strictly preserving every existing user waypoint.
+ */
+export function planBranchLegSplices(
+  baseCoords: [number, number][],
+  waypoints: ReadonlyArray<{ lat: number; lon: number }>,
+  targetCoords: [number, number][],
+  options: { kind?: 'segment' | 'variant'; baseStartM?: number; baseEndM?: number } = {},
+): BranchLegSplice[] {
+  const nWps = waypoints.length;
+  if (nWps < 2 || baseCoords.length < 2 || targetCoords.length < 2) return [];
+
+  const wpBaseIdx = projectWaypointsMonotonic(baseCoords, waypoints);
+
+  if (options.kind === 'variant') {
+    const wpTargetIdx = projectWaypointsMonotonic(targetCoords, waypoints);
+    const splices: BranchLegSplice[] = [];
+    for (let leg = 0; leg < nWps - 1; leg++) {
+      const tStart = wpTargetIdx[leg];
+      const tEnd = wpTargetIdx[leg + 1];
+      if (tEnd <= tStart) continue;
+      const legTarget = targetCoords.slice(tStart, tEnd + 1);
+      const baseLeg = baseCoords.slice(wpBaseIdx[leg], wpBaseIdx[leg + 1] + 1);
+      if (coordsDivergeFromBaseLeg(legTarget, baseLeg)) {
+        splices.push({ legIdx: leg, coords: legTarget });
+      }
+    }
+    return splices;
+  }
+
+  // Compute cumulative base distances so baseStartM maps unambiguously to the right leg on loops.
+  const baseCumDistM = new Float64Array(baseCoords.length);
+  for (let i = 0; i + 1 < baseCoords.length; i++) {
+    baseCumDistM[i + 1] =
+      baseCumDistM[i] +
+      distanceMeters(
+        { lat: baseCoords[i][1], lon: baseCoords[i][0] },
+        { lat: baseCoords[i + 1][1], lon: baseCoords[i + 1][0] },
+      );
+  }
+
+  let startLeg = 0;
+  if (options.baseStartM !== undefined) {
+    for (let w = 0; w < nWps - 1; w++) {
+      if (baseCumDistM[wpBaseIdx[w]] <= options.baseStartM + 30) {
+        startLeg = w;
+      }
+    }
+  } else {
+    const startIdx = nearestIdxInRange(baseCoords, targetCoords[0], 0, baseCoords.length - 1);
+    for (let w = 0; w < nWps - 1; w++) {
+      if (wpBaseIdx[w] <= startIdx) {
+        startLeg = w;
+      }
+    }
+  }
+
+  const splices: BranchLegSplice[] = [];
+  let remaining = targetCoords;
+  let curLeg = startLeg;
+
+  while (curLeg < nWps - 1 && remaining.length >= 2) {
+    const legStart = wpBaseIdx[curLeg];
+    const legEnd = wpBaseIdx[curLeg + 1];
+
+    // Check if the branch genuinely passes through the next interior waypoint into the following leg.
+    let splitIdx = -1;
+    if (curLeg + 1 < nWps - 1) {
+      const nextWp = waypoints[curLeg + 1];
+      let bestDistM = 80;
+      for (let i = 1; i < remaining.length - 1; i++) {
+        const d = distanceMeters(
+          { lat: remaining[i][1], lon: remaining[i][0] },
+          { lat: nextWp.lat, lon: nextWp.lon },
+        );
+        if (d < bestDistM) {
+          bestDistM = d;
+          splitIdx = i;
+        }
+      }
+    }
+
+    const startInLeg = nearestIdxInRange(baseCoords, remaining[0], legStart, legEnd);
+    if (splitIdx > 0) {
+      const head = remaining.slice(0, splitIdx + 1);
+      const spliced: [number, number][] = [
+        ...baseCoords.slice(legStart, startInLeg),
+        ...head,
+      ];
+      if (spliced.length >= 2) {
+        splices.push({ legIdx: curLeg, coords: spliced });
+      }
+      remaining = remaining.slice(splitIdx);
+      curLeg++;
+      continue;
+    }
+
+    const endPt = remaining[remaining.length - 1];
+    const endInLeg = nearestIdxInRange(baseCoords, endPt, startInLeg, legEnd);
+    const rejoinDistM = distanceMeters(
+      { lat: endPt[1], lon: endPt[0] },
+      { lat: baseCoords[endInLeg][1], lon: baseCoords[endInLeg][0] },
+    );
+
+    const spliced: [number, number][] =
+      rejoinDistM <= 250
+        ? [
+            ...baseCoords.slice(legStart, startInLeg),
+            ...remaining,
+            ...baseCoords.slice(endInLeg + 1, legEnd + 1),
+          ]
+        : [
+            ...baseCoords.slice(legStart, startInLeg),
+            ...remaining,
+            [waypoints[curLeg + 1].lon, waypoints[curLeg + 1].lat],
+          ];
+    if (spliced.length >= 2) {
+      splices.push({ legIdx: curLeg, coords: spliced });
+    }
+    break;
+  }
+
+  return splices;
 }

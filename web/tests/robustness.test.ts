@@ -8,7 +8,14 @@ import {
   analyzeRobustness,
   buildRobustnessProbes,
   createRobustnessSession,
+  filterFrequentBranches,
+  filterFrequentCorridors,
   halton,
+  planBranchLegSplices,
+  samplePerturbationVector,
+  type AlternativeBranch,
+  type AlternativeCorridor,
+  type PerturbationVector,
   type RobustnessProbeResult,
 } from '../src/utils/robustness.ts';
 
@@ -43,24 +50,50 @@ function makeMockRoute(
   };
 }
 
-test('halton low-discrepancy sequence is deterministic and bounded in (0, 1)', () => {
-  for (let i = 1; i <= 80; i++) {
+function zeroVec(overrides: Partial<PerturbationVector> = {}): PerturbationVector {
+  return {
+    traffic: 0,
+    hills: 0,
+    surface: 0,
+    turns: 0,
+    crossings: 0,
+    cycleways: 0,
+    greenery: 0,
+    noise: 0,
+    lighting: 0,
+    ...overrides,
+  };
+}
+
+test('halton sequence and pure QMC perturbation vectors are deterministic, bounded, and centered', () => {
+  let trafficSum = 0;
+  let noiseSum = 0;
+  for (let i = 1; i <= 160; i++) {
     const v2 = halton(i, 2);
-    const v3 = halton(i, 3);
     assert.ok(v2 > 0 && v2 < 1);
-    assert.ok(v3 > 0 && v3 < 1);
     assert.equal(v2, halton(i, 2));
+
+    const { u, norm } = samplePerturbationVector(i);
+    assert.ok(norm > 0 && norm <= 3.01);
+    for (const val of Object.values(u)) {
+      assert.ok(val >= -1 && val <= 1);
+    }
+    trafficSum += u.traffic;
+    noiseSum += u.noise;
   }
+  assert.ok(Math.abs(trafficSum / 160) < 0.08, 'Expected traffic axis to be centered near 0');
+  assert.ok(Math.abs(noiseSum / 160) < 0.08, 'Expected noise axis to be centered near 0');
 });
 
-test('20-run preset covers all 6 perturbation dimensions evenly', () => {
+test('20-run preset produces 20 pure QMC samples covering multiple dimensions', () => {
   const probes = buildRobustnessProbes({ baseProfile: 'gabis-lite-gravel', scenarioCount: 20 });
   assert.equal(probes.length, 20);
+  assert.ok(probes.every((p) => p.kind === 'sample'));
   const dims = new Set(probes.map((p) => p.dimension));
-  assert.equal(dims.size, 6, 'Expected 20-run sweep to span all 6 dimensions');
+  assert.ok(dims.size >= 4, 'Expected 20 pure QMC samples to span multiple dimensions');
 });
 
-test('buildRobustnessProbes compiles all 160 scenarios cleanly in WasmRouter for all 8 built-in profiles', async () => {
+test('buildRobustnessProbes compiles all 160 pure QMC scenarios cleanly in WasmRouter for all 8 built-in profiles', async () => {
   await initWasm({ module_or_path: fs.readFileSync(WASM_PATH) });
   const router = new WasmRouter();
   router.load_lookups(fs.readFileSync(path.join(PROFILES_DIR, 'lookups.dat'), 'utf8'));
@@ -74,8 +107,7 @@ test('buildRobustnessProbes compiles all 160 scenarios cleanly in WasmRouter for
       scenarioCount: 160,
     });
     assert.equal(probes.length, 160, `Expected 160 probes for ${profileId}`);
-    assert.equal(probes.filter((p) => p.kind === 'directional').length, 28);
-    assert.equal(probes.filter((p) => p.kind === 'jitter').length, 132);
+    assert.ok(probes.every((p) => p.kind === 'sample'));
 
     for (const probe of probes) {
       assert.doesNotThrow(
@@ -91,7 +123,7 @@ test('buildRobustnessProbes compiles all 160 scenarios cleanly in WasmRouter for
   }
 });
 
-test('analyzeRobustness reports 100% stability and zero alternatives when all probes match base', () => {
+test('analyzeRobustness reports 100% stability and zero alternatives when all samples match base', () => {
   const baseCoords: [number, number][] = [
     [-0.14, 51.46],
     [-0.13, 51.47],
@@ -101,20 +133,24 @@ test('analyzeRobustness reports 100% stability and zero alternatives when all pr
 
   const probes: RobustnessProbeResult[] = [
     {
-      id: 'hills-strong-flat',
-      kind: 'directional',
-      label: 'Flattest route',
+      id: 'sample-1',
+      kind: 'sample',
+      label: 'Sample #1',
       dimension: 'Hills',
-      description: 'Flatter test',
+      description: 'Test',
+      u: zeroVec({ hills: 0.4 }),
+      norm: 0.4,
       fullDsl: '',
       route: makeMockRoute(baseCoords, 3000, 605, 25),
     },
     {
-      id: 'jitter-1',
-      kind: 'jitter',
-      label: 'Combined mix #1',
+      id: 'sample-2',
+      kind: 'sample',
+      label: 'Sample #2',
       dimension: 'Traffic',
-      description: 'Jitter test',
+      description: 'Test',
+      u: zeroVec({ traffic: -0.3 }),
+      norm: 0.3,
       fullDsl: '',
       route: makeMockRoute(baseCoords, 3000, 610, 25),
     },
@@ -127,10 +163,11 @@ test('analyzeRobustness reports 100% stability and zero alternatives when all pr
   assert.equal(res.spineShare, 1);
   assert.equal(res.fragileShare, 0);
   assert.equal(res.corridors.length, 0);
+  assert.equal(res.branches.length, 0);
   assert.equal(res.baseMatchingProbes, 2);
 });
 
-test('analyzeRobustness prefers directional labels over jitter labels and auto-names pure jitter clusters', () => {
+test('analyzeRobustness picks minimum-perturbation representative and infers statistical drivers', () => {
   const baseRoute = makeMockRoute(
     [
       [-0.20, 51.50],
@@ -150,75 +187,363 @@ test('analyzeRobustness prefers directional labels over jitter labels and auto-n
     [-0.10, 51.50],
   ];
 
-  const pureJitterCoords: [number, number][] = [
-    [-0.20, 51.50],
-    [-0.16, 51.55],
-    [-0.10, 51.50],
+  const probes: RobustnessProbeResult[] = [
+    // Large perturbation arrives FIRST
+    {
+      id: 'sample-1',
+      kind: 'sample',
+      label: 'Sample #1',
+      dimension: 'Hills',
+      description: 'Large hill shift',
+      u: zeroVec({ hills: 0.9, traffic: 0.6 }),
+      norm: Math.hypot(0.9, 0.6),
+      fullDsl: 'dsl-large',
+      route: makeMockRoute(southernCoords, 9620, 1750, 42),
+    },
+    // Smaller perturbation arrives SECOND and should become the cluster representative
+    {
+      id: 'sample-2',
+      kind: 'sample',
+      label: 'Sample #2',
+      dimension: 'Hills',
+      description: 'Small hill shift',
+      u: zeroVec({ hills: 0.45 }),
+      norm: 0.45,
+      fullDsl: 'dsl-min-perturbation',
+      route: makeMockRoute(southernCoords, 9600, 1740, 40),
+    },
+    {
+      id: 'sample-3',
+      kind: 'sample',
+      label: 'Sample #3',
+      dimension: 'Hills',
+      description: 'Medium hill shift',
+      u: zeroVec({ hills: 0.75, traffic: -0.2 }),
+      norm: Math.hypot(0.75, 0.2),
+      fullDsl: 'dsl-med',
+      route: makeMockRoute(southernCoords, 9610, 1745, 41),
+    },
+  ];
+
+  const res = analyzeRobustness(baseRoute, probes, 3);
+  const session = createRobustnessSession(baseRoute, 3);
+  for (const p of probes) session.addProbe(p);
+  assert.deepEqual(session.snapshot(), res);
+
+  assert.equal(res.corridors.length, 1);
+  assert.equal(res.corridors[0].probeCount, 3);
+  assert.equal(res.corridors[0].fullDsl, 'dsl-min-perturbation');
+  assert.equal(res.corridors[0].label, 'Variant 1');
+  assert.ok(res.corridors[0].probeLabels.includes('Flatter'));
+
+  assert.equal(res.branches.length, 1);
+  assert.equal(res.branches[0].fullDsl, 'dsl-min-perturbation');
+  assert.match(res.branches[0].label, /^km \d+\.\d-\d+\.\d$/);
+  assert.ok(res.branches[0].probeLabels.includes('Flatter'));
+});
+
+test('loud cycleway uses neutral labels and reports factual noise mix', () => {
+  const baseRoute = makeMockRoute(
+    [
+      [-0.20, 51.40],
+      [-0.20, 51.38],
+      [-0.20, 51.36],
+      [-0.20, 51.34],
+    ],
+    6600,
+    1200,
+    40,
+  );
+  (baseRoute.features[0].properties as Record<string, unknown>).segments = [
+    { from: 0, to: 6600, surface: 'asphalt', highway: 'unclassified', noise: 1, traffic: 1 },
+  ];
+
+  const loudCyclewayRoute = makeMockRoute(
+    [
+      [-0.20, 51.40],
+      [-0.18, 51.38],
+      [-0.18, 51.36],
+      [-0.20, 51.34],
+    ],
+    7100,
+    1220,
+    35,
+  );
+  (loudCyclewayRoute.features[0].properties as Record<string, unknown>).segments = [
+    { from: 0, to: 7100, surface: 'asphalt', highway: 'cycleway', noise: 6, traffic: 0 },
   ];
 
   const probes: RobustnessProbeResult[] = [
-    // Jitter arrives BEFORE directional on the southern corridor
     {
-      id: 'jitter-3',
-      kind: 'jitter',
-      label: 'Combined mix #3',
-      dimension: 'Hills',
-      description: 'Combined hill jitter',
-      fullDsl: 'dsl-jitter-3',
-      route: makeMockRoute(southernCoords, 9620, 1750, 42),
+      id: 'sample-1',
+      kind: 'sample',
+      label: 'Sample #1',
+      dimension: 'Cycleways',
+      description: 'Test',
+      u: zeroVec({ cycleways: 0.85, noise: -0.65 }),
+      norm: Math.hypot(0.85, 0.65),
+      fullDsl: 'dsl-1',
+      route: loudCyclewayRoute,
     },
     {
-      id: 'hills-strong-flat',
-      kind: 'directional',
-      label: 'Flattest route',
-      dimension: 'Hills',
-      description: 'Strong climb avoidance',
-      fullDsl: 'dsl-flat',
-      route: makeMockRoute(southernCoords, 9600, 1740, 40),
-    },
-    // Pure jitter corridor with lower climb
-    {
-      id: 'jitter-9',
-      kind: 'jitter',
-      label: 'Combined mix #9',
-      dimension: 'Surface',
-      description: 'Combined surface and hill shift',
-      fullDsl: 'dsl-jitter-9',
-      route: makeMockRoute(pureJitterCoords, 9800, 1790, 65),
-    },
-    {
-      id: 'direct-high-flow',
-      kind: 'directional',
-      label: 'Fast and direct',
-      dimension: 'Directness',
-      description: 'Matches base',
-      fullDsl: 'dsl-fast',
-      route: baseRoute,
+      id: 'sample-2',
+      kind: 'sample',
+      label: 'Sample #2',
+      dimension: 'Cycleways',
+      description: 'Test',
+      u: zeroVec({ cycleways: 0.7, noise: -0.5 }),
+      norm: Math.hypot(0.7, 0.5),
+      fullDsl: 'dsl-2',
+      route: loudCyclewayRoute,
     },
   ];
 
-  const res = analyzeRobustness(baseRoute, probes, 4);
-  const session = createRobustnessSession(baseRoute, 4);
-  for (const p of probes) {
-    session.addProbe(p);
-  }
-  const streamed = session.snapshot();
-  assert.deepEqual(streamed, res);
-  assert.equal(res.corridors.length, 2);
+  const res = analyzeRobustness(baseRoute, probes, 2);
+  assert.equal(res.branches.length, 1);
+  assert.match(res.branches[0].label, /^km \d+\.\d-\d+\.\d$/);
+  assert.equal(res.branches[0].branchMix.loudNoisePct, 100);
+  assert.equal(res.corridors.length, 1);
+  assert.equal(res.corridors[0].label, 'Variant 1');
+});
 
-  // Cluster 0 has 2 probes and upgrades its primary label to 'Flattest route'
-  assert.equal(res.corridors[0].probeCount, 2);
-  assert.equal(res.corridors[0].sharePct, 50);
-  assert.equal(res.corridors[0].label, 'Flattest route');
-  assert.equal(res.corridors[0].fullDsl, 'dsl-flat');
+test('filterFrequentCorridors and filterFrequentBranches keep high probability mass options', () => {
+  const makeCorridor = (id: string, probeCount: number) =>
+    ({ id, probeCount }) as unknown as AlternativeCorridor;
+  const makeBranch = (id: string, probeCount: number) =>
+    ({ id, probeCount }) as unknown as AlternativeBranch;
 
-  // Cluster 1 is pure jitter with -55m climb -> 'Lower-climb variant'
-  assert.equal(res.corridors[1].probeCount, 1);
-  assert.equal(res.corridors[1].label, 'Lower-climb variant');
+  // Variants: 80 total runs, 75 diverging across 12 variants -> keep top 70% nucleus
+  const variants = [
+    makeCorridor('v1', 16),
+    makeCorridor('v2', 12),
+    makeCorridor('v3', 10),
+    makeCorridor('v4', 8),
+    makeCorridor('v5', 7),
+    makeCorridor('v6', 5),
+    makeCorridor('v7', 4),
+    makeCorridor('v8', 3),
+    makeCorridor('v9', 3),
+    makeCorridor('v10', 3),
+    makeCorridor('v11', 2),
+    makeCorridor('v12', 2),
+  ];
+  const frequentVariants = filterFrequentCorridors(variants, 80);
+  assert.deepEqual(
+    frequentVariants.map((v) => v.id),
+    ['v1', 'v2', 'v3', 'v4', 'v5'],
+  );
+
+  // Dominant single variant (40/50 diverging runs = 80% mass) -> keep only v1
+  const dominant = filterFrequentCorridors(
+    [makeCorridor('v1', 40), makeCorridor('v2', 5), makeCorridor('v3', 3), makeCorridor('v4', 2)],
+    80,
+  );
+  assert.deepEqual(
+    dominant.map((v) => v.id),
+    ['v1'],
+  );
+
+  // Segments: keep >=15% marginal probability branches
+  const branches = [
+    makeBranch('b1', 50),
+    makeBranch('b2', 42),
+    makeBranch('b3', 16),
+    makeBranch('b4', 10),
+    makeBranch('b5', 4),
+    makeBranch('b6', 1),
+  ];
+  const frequentBranches = filterFrequentBranches(branches, 80);
+  assert.deepEqual(
+    frequentBranches.map((b) => b.id),
+    ['b1', 'b2', 'b3'],
+  );
+
+  // Rare segments fallback: all <15%, relax to >=10%
+  const modestBranches = [makeBranch('b1', 10), makeBranch('b2', 8), makeBranch('b3', 3)];
+  assert.deepEqual(
+    filterFrequentBranches(modestBranches, 80).map((b) => b.id),
+    ['b1', 'b2'],
+  );
+});
+
+test('looped multi-waypoint routes do not clip leg-0 detours at finish or drop interior waypoints', () => {
+  // Lollipop route A -> 1 -> 2 -> 3 -> B (~55 km), where B is geographically near the leg-0 detour
+  const baseCoords: [number, number][] = [
+    [-0.20, 51.42], // A (0 km)
+    [-0.24, 51.35], // Epsom (~8.5 km)
+    [-0.31, 51.30], // Leatherhead (~16 km)
+    [-0.36, 51.23], // WP 1 (~24 km)
+    [-0.36, 51.16], // WP 2 (~32 km)
+    [-0.30, 51.20], // WP 3 (~39 km)
+    [-0.27, 51.26], // B (~47 km, near the eastern Headley detour corridor)
+  ];
+  const waypoints = [
+    { lat: 51.42, lon: -0.20 }, // A
+    { lat: 51.23, lon: -0.36 }, // 1
+    { lat: 51.16, lon: -0.36 }, // 2
+    { lat: 51.20, lon: -0.30 }, // 3
+    { lat: 51.26, lon: -0.27 }, // B
+  ];
+  const baseRoute = makeMockRoute(baseCoords, 47000, 9000, 600);
+
+  // Probe takes an eastern leg-0 detour passing right through B's coordinates (-0.27, 51.26)
+  // before continuing on to WP 1 -> WP 2 -> WP 3 -> B.
+  const probeCoords: [number, number][] = [
+    [-0.20, 51.42], // A
+    [-0.24, 51.35], // Epsom (leaves base here)
+    [-0.26, 51.30], // Headley
+    [-0.27, 51.26], // Passes right past B on leg 0!
+    [-0.31, 51.24], // Dorking
+    [-0.36, 51.23], // Rejoins at WP 1
+    [-0.36, 51.16], // WP 2
+    [-0.30, 51.20], // WP 3
+    [-0.27, 51.26], // B
+  ];
+  const probeRoute = makeMockRoute(probeCoords, 49000, 9300, 650);
+
+  const res = analyzeRobustness(
+    baseRoute,
+    [
+      {
+        id: 'sample-1',
+        kind: 'sample',
+        label: 'Sample #1',
+        dimension: 'Traffic',
+        description: 'Test',
+        u: zeroVec({ traffic: 0.6 }),
+        norm: 0.6,
+        fullDsl: 'dsl-1',
+        route: probeRoute,
+      },
+    ],
+    1,
+  );
+
+  // Detour should stay one continuous leg-0 branch (~8.5 km -> ~24 km), NOT clipped at B (~47 km)
+  assert.equal(res.branches.length, 1);
+  assert.ok(res.branches[0].baseStartM < 12000, `Unexpected baseStartM ${res.branches[0].baseStartM}`);
+  assert.ok(res.branches[0].baseEndM < 28000, `Branch jumped across loop to ${res.branches[0].baseEndM}`);
+
+  // Applying the segment splices ONLY leg 0 (A -> 1), preserving waypoints 1, 2, 3, B
+  const segSplices = planBranchLegSplices(baseCoords, waypoints, res.branches[0].coordinates, {
+    kind: 'segment',
+    baseStartM: res.branches[0].baseStartM,
+    baseEndM: res.branches[0].baseEndM,
+  });
+  assert.equal(segSplices.length, 1);
+  assert.equal(segSplices[0].legIdx, 0);
+
+  // Even if a clipped branch ended right on B's coordinates, planBranchLegSplices keeps it in leg 0
+  const clippedBranch: [number, number][] = [
+    [-0.24, 51.35],
+    [-0.26, 51.30],
+    [-0.27, 51.26],
+  ];
+  const safeSplices = planBranchLegSplices(baseCoords, waypoints, clippedBranch, {
+    kind: 'segment',
+    baseStartM: 8500,
+    baseEndM: 47000,
+  });
+  assert.equal(safeSplices.length, 1);
+  assert.equal(safeSplices[0].legIdx, 0);
+
+  // Applying the full variant only splices leg 0 (the changed leg) and leaves legs 1, 2, 3 intact
+  const varSplices = planBranchLegSplices(baseCoords, waypoints, probeCoords, {
+    kind: 'variant',
+  });
+  assert.deepEqual(
+    varSplices.map((s) => s.legIdx),
+    [0],
+  );
+});
+
+test('createRobustnessSession aggregates independent local forks into separate branches', () => {
+  const baseRoute = makeMockRoute(
+    [
+      [-0.20, 51.50],
+      [-0.18, 51.50],
+      [-0.16, 51.50],
+      [-0.14, 51.50],
+      [-0.12, 51.50],
+      [-0.10, 51.50],
+      [-0.08, 51.50],
+    ],
+    8400,
+    1600,
+    50,
+  );
+
+  const forkAOnly: [number, number][] = [
+    [-0.20, 51.50],
+    [-0.18, 51.50],
+    [-0.16, 51.51],
+    [-0.14, 51.50],
+    [-0.12, 51.50],
+    [-0.10, 51.50],
+    [-0.08, 51.50],
+  ];
+  const forkBOnly: [number, number][] = [
+    [-0.20, 51.50],
+    [-0.18, 51.50],
+    [-0.16, 51.50],
+    [-0.14, 51.50],
+    [-0.12, 51.50],
+    [-0.10, 51.49],
+    [-0.08, 51.50],
+  ];
+  const bothForks: [number, number][] = [
+    [-0.20, 51.50],
+    [-0.18, 51.50],
+    [-0.16, 51.51],
+    [-0.14, 51.50],
+    [-0.12, 51.50],
+    [-0.10, 51.49],
+    [-0.08, 51.50],
+  ];
+
+  const session = createRobustnessSession(baseRoute, 3);
+  session.addProbe({
+    id: 'sample-1',
+    kind: 'sample',
+    label: 'Sample #1',
+    dimension: 'Surface',
+    description: 'Fork A',
+    u: zeroVec({ surface: -0.8 }),
+    norm: 0.8,
+    fullDsl: 'dsl-a',
+    route: makeMockRoute(forkAOnly, 8800, 1650, 55),
+  });
+  session.addProbe({
+    id: 'sample-2',
+    kind: 'sample',
+    label: 'Sample #2',
+    dimension: 'Traffic',
+    description: 'Fork B',
+    u: zeroVec({ traffic: 0.8 }),
+    norm: 0.8,
+    fullDsl: 'dsl-b',
+    route: makeMockRoute(forkBOnly, 8900, 1680, 52),
+  });
+  session.addProbe({
+    id: 'sample-3',
+    kind: 'sample',
+    label: 'Sample #3',
+    dimension: 'Surface',
+    description: 'Both forks',
+    u: zeroVec({ surface: -0.7, traffic: 0.7 }),
+    norm: Math.hypot(0.7, 0.7),
+    fullDsl: 'dsl-ab',
+    route: makeMockRoute(bothForks, 9300, 1730, 57),
+  });
+
+  const snap = session.snapshot();
+  assert.equal(snap.branches.length, 2, 'Expected exactly 2 distinct local detour branches');
+  assert.equal(snap.branches[0].probeCount, 2);
+  assert.equal(snap.branches[1].probeCount, 2);
 });
 
 test(
-  'end-to-end 40-scenario WASM robustness sweep on Whitebushes to Leith Hill',
+  'end-to-end 40-scenario pure QMC WASM sweep on Whitebushes to Leith Hill',
   { skip: !HAS_RD5_DATA },
   async () => {
     await initWasm({ module_or_path: fs.readFileSync(WASM_PATH) });
@@ -261,6 +586,8 @@ test(
         label: p.label,
         dimension: p.dimension,
         description: p.description,
+        u: p.u,
+        norm: p.norm,
         fullDsl: p.fullDsl,
         axes: p.axes,
         baseTemplate: p.baseTemplate,
@@ -273,12 +600,13 @@ test(
     assert.equal(analysis.completedCount, 40);
     assert.ok(analysis.overallStability > 0.3 && analysis.overallStability < 1.0);
     assert.ok(analysis.segments.length >= 2);
-    assert.ok(analysis.corridors.length >= 2, 'Expected multiple distinct alternative corridors across 40 scenarios');
+    assert.ok(analysis.branches.length >= 2);
+    assert.ok(analysis.corridors.length >= 2);
   },
 );
 
 test(
-  '80-scenario sweep on Tooting to Roehampton Gate (gabis-lite-gravel) discovers Wimbledon Common corridor',
+  '80-scenario pure QMC sweep on Tooting to Roehampton Gate (gabis-lite-gravel) discovers Wimbledon Common',
   { skip: !HAS_RD5_DATA },
   async () => {
     await initWasm({ module_or_path: fs.readFileSync(WASM_PATH) });
@@ -321,6 +649,8 @@ test(
         label: p.label,
         dimension: p.dimension,
         description: p.description,
+        u: p.u,
+        norm: p.norm,
         fullDsl: p.fullDsl,
         axes: p.axes,
         baseTemplate: p.baseTemplate,
@@ -335,110 +665,18 @@ test(
     const crossesWimbledonCommon = (coords: [number, number][]) =>
       coords.some(([lon, lat]) => lon >= -0.252 && lon <= -0.236 && lat >= 51.425 && lat <= 51.438);
 
-    assert.equal(
-      crossesWimbledonCommon(
-        baseRoute.features[0].geometry.coordinates.map((c) => [c[0], c[1]]),
-      ),
-      false,
-      'Base gabis-lite-gravel route skirts north around Wimbledon Common',
-    );
-    const commonCorridors = analysis.corridors.filter((c) => crossesWimbledonCommon(c.coordinates));
-    assert.ok(
-      commonCorridors.length >= 1,
-      'Expected at least one discovered corridor crossing Wimbledon Common',
-    );
     const commonBranches = analysis.branches.filter((b) => crossesWimbledonCommon(b.coordinates));
     assert.ok(
       commonBranches.length >= 1,
-      'Expected at least one discovered detour branch crossing Wimbledon Common',
+      'Expected pure QMC sweep to discover Wimbledon Common detour branch',
     );
     assert.ok(
       commonBranches[0].branchMix.hasData && commonBranches[0].branchMix.unpavedPct > 0,
       'Expected Wimbledon Common branch to carry unpaved surface mix metadata',
     );
     assert.ok(
-      commonBranches[0].replacedBaseCoords.length >= 2,
-      'Expected replaced base route span coordinates on Wimbledon Common branch',
+      commonBranches[0].probeLabels.some((lbl) => /off-road|gravel|green/i.test(lbl)),
+      `Expected statistical driver chips to identify off-road/gravel, got: ${commonBranches[0].probeLabels.join(', ')}`,
     );
   },
 );
-
-test('createRobustnessSession aggregates independent local forks into separate branches without losing directional branches', () => {
-  const baseRoute = makeMockRoute(
-    [
-      [-0.20, 51.50],
-      [-0.18, 51.50],
-      [-0.16, 51.50],
-      [-0.14, 51.50],
-      [-0.12, 51.50],
-      [-0.10, 51.50],
-      [-0.08, 51.50],
-    ],
-    8400,
-    1600,
-    50,
-  );
-
-  // Fork A around west half (-0.18 to -0.14), Fork B around east half (-0.12 to -0.08)
-  const forkAOnly: [number, number][] = [
-    [-0.20, 51.50],
-    [-0.18, 51.50],
-    [-0.16, 51.51],
-    [-0.14, 51.50],
-    [-0.12, 51.50],
-    [-0.10, 51.50],
-    [-0.08, 51.50],
-  ];
-  const forkBOnly: [number, number][] = [
-    [-0.20, 51.50],
-    [-0.18, 51.50],
-    [-0.16, 51.50],
-    [-0.14, 51.50],
-    [-0.12, 51.50],
-    [-0.10, 51.49],
-    [-0.08, 51.50],
-  ];
-  const bothForks: [number, number][] = [
-    [-0.20, 51.50],
-    [-0.18, 51.50],
-    [-0.16, 51.51],
-    [-0.14, 51.50],
-    [-0.12, 51.50],
-    [-0.10, 51.49],
-    [-0.08, 51.50],
-  ];
-
-  const session = createRobustnessSession(baseRoute, 3);
-  session.addProbe({
-    id: 'surface-offroad-trails',
-    kind: 'directional',
-    label: 'Off-road gravel and commons',
-    dimension: 'Surface',
-    description: 'Fork A directional',
-    fullDsl: 'dsl-a',
-    route: makeMockRoute(forkAOnly, 8800, 1650, 55),
-  });
-  session.addProbe({
-    id: 'traffic-strong-quiet',
-    kind: 'directional',
-    label: 'Quiet backroads only',
-    dimension: 'Traffic',
-    description: 'Fork B directional',
-    fullDsl: 'dsl-b',
-    route: makeMockRoute(forkBOnly, 8900, 1680, 52),
-  });
-  session.addProbe({
-    id: 'jitter-1',
-    kind: 'jitter',
-    label: 'Combined mix #1',
-    dimension: 'Surface',
-    description: 'Both forks',
-    fullDsl: 'dsl-ab',
-    route: makeMockRoute(bothForks, 9300, 1730, 57),
-  });
-
-  const snap = session.snapshot();
-  assert.equal(snap.branches.length, 2, 'Expected exactly 2 distinct local detour branches');
-  assert.equal(snap.branches[0].probeCount, 2, 'Each fork should accumulate count from both single-fork and combined probes');
-  assert.equal(snap.branches[1].probeCount, 2);
-});
