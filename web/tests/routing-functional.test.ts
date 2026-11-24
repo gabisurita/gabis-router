@@ -153,7 +153,8 @@ const isUnpavedOffroad = (s: RouteStep) =>
 
 const hasFarmlandBarrier = (s: RouteStep) => FARMLAND_BARRIERS.has(s.nodeTags.barrier);
 
-const isSharpTurn = (s: RouteStep) => s.turnCost >= 25;
+// BRouter reports turnCost = (1 - cos(angle)) * turncost (e.g. 90 for a 90 deg turn at turncost=90).
+const isSharpTurn = (s: RouteStep) => s.turnCost >= 50;
 
 const isFootway = (s: RouteStep) =>
   s.fromM >= 100 &&

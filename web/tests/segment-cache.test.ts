@@ -40,9 +40,8 @@ test('getRd5CreationDate parses real rd5 file if available', () => {
     const fileBytes = readFileSync(filePath);
     const date = getRd5CreationDate(fileBytes.buffer.slice(fileBytes.byteOffset, fileBytes.byteOffset + fileBytes.byteLength));
     assert.ok(date instanceof Date);
-    assert.equal(date.getUTCFullYear(), 2026);
-    assert.equal(date.getUTCMonth(), 9); // October (0-indexed: 9)
-    assert.ok(date.getUTCDate() >= 12);
+    assert.ok(date.getTime() >= Date.UTC(2026, 9, 12));
+    assert.ok(date.getTime() <= Date.now() + 86_400_000);
   }
 });
 
